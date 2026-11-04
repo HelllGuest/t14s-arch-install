@@ -1,3 +1,4 @@
+# Local VM rehearsal artifacts (optional; harness not shipped in this repo)
 *.iso
 *.qcow2
 *.img

@@ -60,14 +60,18 @@ Stack:   LUKS2 + Btrfs(+@tmp) + linux-lts/hardened + UKI + systemd-boot
          + minimal GNOME + zram + AppArmor + UFW + Snapper + Secure Boot
 EOF
 
-# Soft DMI check — Gen 3 AMD types only (21CQ/21CR). VM / off-hardware: confirm.
+# Soft DMI check — Gen 3 AMD types only (21CQ/21CR). Anchored to avoid substring noise.
 _dmi="$(cat /sys/class/dmi/id/product_family /sys/class/dmi/id/product_version \
           /sys/class/dmi/id/product_name /sys/class/dmi/id/product_sku 2>/dev/null \
         | tr '\n' ' ')"
-if ! echo "$_dmi" | grep -qiE '21CQ|21CR'; then
+if ! echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
   warn "DMI is not T14s Gen 3 AMD type 21CQ/21CR: ${_dmi:-unknown}"
   warn "Continue only if intentional (VM rehearsal / forced). Wrong machine? Abort."
   confirm "continue on this hardware anyway?" || die "aborted — this installer is for type 21CQ/21CR only"
+fi
+if ! grep -q AuthenticAMD /proc/cpuinfo; then
+  warn "CPU is not AuthenticAMD — this installer sets amd-ucode + amd_iommu/amd_pstate."
+  confirm "continue without an AMD CPU (VM rehearsal)?" || die "aborted — need AuthenticAMD or explicit YES"
 fi
 ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
 
@@ -138,10 +142,22 @@ done
 
 # ── 4. identity ─────────────────────────────────────────────
 HOSTNAME="$(ask 'hostname: ' thinkpad-t14s)"
+[[ -n $HOSTNAME ]] || die "hostname cannot be empty"
 TIMEZONE="$(ask 'timezone (Region/City): ' America/New_York)"
 LOCALE="$(ask 'locale: ' en_US.UTF-8)"
 KEYMAP="$(ask 'console keymap: ' us)"
-USERNAME="$(ask 'username: ')"
+while :; do
+  USERNAME="$(ask 'username: ')"
+  if [[ -z $USERNAME ]]; then
+    warn "username cannot be empty"
+  elif [[ $USERNAME == root ]]; then
+    warn "username cannot be 'root'"
+  elif ! [[ $USERNAME =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+    warn "username must match ^[a-z_][a-z0-9_-]*$ (lowercase POSIX)"
+  else
+    break
+  fi
+done
 while :; do
   USER_PASS="$(ask_secret "password for $USERNAME: ")"
   USER_PASS2="$(ask_secret 'repeat: ')"
@@ -152,6 +168,7 @@ while :; do
   ROOT_PASS2="$(ask_secret 'repeat: ')"
   [[ -n $ROOT_PASS && $ROOT_PASS == "$ROOT_PASS2" ]] && break; warn "mismatch — retry"
 done
+unset -v LUKS_PASS2 USER_PASS2 ROOT_PASS2
 
 DESKTOP="$(ask 'install minimal GNOME desktop? [Y/n]: ' Y)"
 ENROLL_SB="$(ask 'enroll Secure Boot keys now if firmware in Setup Mode? [y/N]: ' N)"
@@ -161,6 +178,7 @@ say "LUKS2 format (argon2id) on $ROOT_PART"
 wipefs -a "$ROOT_PART" >/dev/null 2>&1 || true   # clear stale signatures (dirty/reused disk)
 printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode "$ROOT_PART" -
 printf '%s' "$LUKS_PASS" | cryptsetup open "$ROOT_PART" cryptroot -
+unset -v LUKS_PASS
 LUKS_UUID="$(cryptsetup luksUUID "$ROOT_PART")"   # LUKS header UUID (for rd.luks.name)
 [[ -n $LUKS_UUID ]] || die "could not read LUKS UUID from $ROOT_PART"
 ok "LUKS open as /dev/mapper/cryptroot (LUKS UUID=$LUKS_UUID)"
@@ -193,7 +211,8 @@ mount -t vfat "$EFI_PART" /mnt/boot                # explicit type: don't rely o
 esp_mb=$(df -Pm /mnt/boot | awk 'NR==2{print $2}'); esp_mb=${esp_mb:-0}
 (( esp_mb >= 1024 )) || warn "ESP is ${esp_mb}MB — dual-kernel UKIs want >=1024MB; install may fill it"
 # defensive: drop leftover Arch boot files from a prior install so pacstrap won't hit
-# 'conflicting files' (Arch-specific names only — other /EFI/* loaders stay intact)
+# 'conflicting files'. Clears both ucode names for multiboot ESP hygiene (this
+# installer only pacstraps amd-ucode; intel-ucode.img removal is intentional).
 say "cleaning prior Arch boot artifacts on ESP"
 rm -f /mnt/boot/intel-ucode.img /mnt/boot/amd-ucode.img \
       /mnt/boot/vmlinuz-linux* /mnt/boot/initramfs-linux* \
@@ -205,11 +224,8 @@ fi
 ok "filesystems mounted (ESP ${esp_mb}MB)"
 
 # ── 6. base install ─────────────────────────────────────────
-# This installer targets Rembrandt AMD — default amd-ucode. Warn on non-AMD (VM).
+# Rembrandt target — always amd-ucode (non-AMD already confirmed at preflight).
 UCODE=amd-ucode
-if ! grep -q AuthenticAMD /proc/cpuinfo; then
-  warn "CPU is not AuthenticAMD — still pacstrapping amd-ucode. VM rehearsal OK."
-fi
 
 say "refreshing live mirrors (best-effort)"
 reflector --latest 20 --protocol https --sort rate --download-timeout 5 \
@@ -268,11 +284,15 @@ cat > /etc/hosts <<EOF
 127.0.1.1 ${HOSTNAME}.localdomain ${HOSTNAME}
 EOF
 
-# users
+# users — secrets from /root/.t14s-install-secrets (0600; shredded after chroot)
+# shellcheck disable=SC1091
+source /root/.t14s-install-secrets
 echo "root:${ROOT_PASS}" | chpasswd
 id "$USERNAME" &>/dev/null || useradd -m -G wheel -s /bin/zsh "$USERNAME"
 echo "${USERNAME}:${USER_PASS}" | chpasswd
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
+unset -v USER_PASS ROOT_PASS
+rm -f /root/.t14s-install-secrets
 
 # initramfs (systemd + sd-encrypt for LUKS)
 sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)/' /etc/mkinitcpio.conf
@@ -362,7 +382,7 @@ net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 vm.swappiness = 100
 EOF
-# userns: needed for Flatpak/Podman under linux-hardened; '-' = ignore on LTS (key absent)
+# userns: needed for Flatpak under linux-hardened; '-' = ignore on LTS (key absent)
 echo '-kernel.unprivileged_userns_clone = 1' > /etc/sysctl.d/99-userns.conf
 
 # firewall — set ENABLED=yes so it's active on first boot (rule-apply may warn in chroot)
@@ -419,11 +439,10 @@ if [[ ${DESKTOP^^} != N* ]]; then
     mkdir -p /etc/gdm
     printf '[daemon]\nWaylandEnable=true\n' > /etc/gdm/custom.conf
     flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
-    # One install per app: a single failure must not abort the rest. Extra-data apps
-    # (Chrome) need bwrap user namespaces, which the kernel refuses inside a chroot;
-    # drop any half-installed ref so you can retry after first boot.
+    # Skip extra-data apps (Chrome) in chroot — bwrap userns refused; install post-boot:
+    #   flatpak install --system -y flathub com.google.Chrome
     failed_fp=()
-    for app in com.brave.Browser app.zen_browser.zen com.google.Chrome \
+    for app in com.brave.Browser app.zen_browser.zen \
                io.gitlab.librewolf-community com.protonvpn.www; do
       if ! flatpak install --system -y --noninteractive flathub "$app"; then
         failed_fp+=("$app")
@@ -455,21 +474,47 @@ fi
 sbctl verify || true
 CHROOT
 
+# Passwords via 0600 file (not arch-chroot env — visible in /proc/*/environ).
+umask 077
+{
+  printf 'USERNAME=%q\n' "$USERNAME"
+  printf 'USER_PASS=%q\n' "$USER_PASS"
+  printf 'ROOT_PASS=%q\n' "$ROOT_PASS"
+} > /mnt/root/.t14s-install-secrets
+chmod 600 /mnt/root/.t14s-install-secrets
+unset -v USER_PASS ROOT_PASS
+
 chmod +x /mnt/root/chroot-setup.sh
 say "running chroot config"
-arch-chroot /mnt env \
+cleanup_chroot_secrets() {
+  shred -u /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets 2>/dev/null \
+    || rm -f /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets
+}
+# Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
+if ! arch-chroot /mnt env \
   TIMEZONE="$TIMEZONE" LOCALE="$LOCALE" KEYMAP="$KEYMAP" HOSTNAME="$HOSTNAME" \
-  USERNAME="$USERNAME" USER_PASS="$USER_PASS" ROOT_PASS="$ROOT_PASS" \
+  USERNAME="$USERNAME" \
   LUKS_UUID="$LUKS_UUID" DESKTOP="$DESKTOP" ENROLL_SB="$ENROLL_SB" FORMAT_EFI="$FORMAT_EFI" \
   bash /root/chroot-setup.sh
-
-shred -u /mnt/root/chroot-setup.sh 2>/dev/null || rm -f /mnt/root/chroot-setup.sh
+then
+  cleanup_chroot_secrets
+  die "chroot setup failed"
+fi
+cleanup_chroot_secrets
 ok "chroot config complete"
 
 # ── 8. finish ───────────────────────────────────────────────
 say "unmounting"
 umount -R /mnt
 cryptsetup close cryptroot
+
+if [[ ${DESKTOP^^} != N* ]]; then
+  LOGIN_HINT="First login via GDM (Wayland)."
+  FLATPAK_HINT="Optional post-boot: flatpak install --system -y flathub com.google.Chrome"
+else
+  LOGIN_HINT="Desktop skipped — log in on a virtual console (getty) as ${USERNAME}."
+  FLATPAK_HINT="Optional later: pacman -S gnome-shell gdm flatpak && systemctl enable gdm"
+fi
 
 cat <<EOF
 
@@ -486,12 +531,11 @@ ${cG}╔════════════════════════
      3) BIOS → Secure Boot → Enabled   (pacman hook auto-resigns on updates)
      ${cY}multiboot:${c0} '-m' keeps Microsoft keys so Windows still boots; other
      unsigned Linux loaders won't boot under SB until you 'sbctl sign' them.
- • linux-hardened + Flatpak/Podman: userns sysctl already set (99-userns.conf).
+ • linux-hardened + Flatpak: userns sysctl already set (99-userns.conf).
  • Hostname: ${cY}${HOSTNAME}${c0}
- • First login via GDM (Wayland). Post-boot checks:
-     ${cY}lscpu | grep -i ryzen${c0}
-     ${cY}cat /sys/power/mem_sleep${c0}
+ • ${LOGIN_HINT}
+ • Post-boot checks:
      ${cY}grep -E 'amd_iommu|amd_pstate' /proc/cmdline${c0}
- • Optional rice/dotfiles: ${cY}https://github.com/HelllGuest/dotfiles${c0}
+ • ${FLATPAK_HINT}
 EOF
 ok "done — reboot when ready"
