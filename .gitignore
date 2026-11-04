@@ -1,0 +1,9 @@
+*.iso
+*.qcow2
+*.img
+.OVMF*
+arch-vmtest/
+.env
+.env.*
+*.pem
+*.key
