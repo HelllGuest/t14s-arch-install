@@ -15,7 +15,10 @@
 # (s2idle); enable AMD SVM + IOMMU. Re-enable Secure Boot after sbctl enroll.
 #
 # RUN FROM THE ARCH ISO (live environment), as root, UEFI mode, with internet.
-# THIS ERASES DATA on the partitions you select. Reads prompts from /dev/tty.
+# THIS ERASES DATA on the partitions you select.
+#
+# UI: full-screen whiptail/dialog TUI on /dev/tty. dialog is installed from the
+# live repos if no backend exists; plain line prompts are the fallback.
 set -euo pipefail
 
 # ── ui helpers ──────────────────────────────────────────────
@@ -23,158 +26,449 @@ c0=$'\e[0m'; cR=$'\e[1;31m'; cG=$'\e[1;32m'; cY=$'\e[1;33m'; cB=$'\e[1;34m'
 say()  { printf '%s>>%s %s\n' "$cB" "$c0" "$*"; }
 ok()   { printf '%s ok%s %s\n' "$cG" "$c0" "$*"; }
 warn() { printf '%s !!%s %s\n' "$cY" "$c0" "$*" >&2; }
-die()  { printf '%sERR%s %s\n' "$cR" "$c0" "$*" >&2; exit 1; }
-trap 'die "failed at line $LINENO"' ERR
 
+DRYRUN=${T14S_DRYRUN:-0}
+UI=${T14S_UI:-plain}
+APP_TITLE="T14s Arch Installer"
+LOG="$(mktemp /tmp/t14s-install.XXXXXX.log)"
+LOGGING=0
+
+# Screen geometry, clamped so tiny/huge terminals stay usable.
+ROWS=$(tput lines 2>/dev/null) || ROWS=24
+COLS=$(tput cols 2>/dev/null) || COLS=80
+[[ $ROWS =~ ^[0-9]+$ ]] || ROWS=24
+[[ $COLS =~ ^[0-9]+$ ]] || COLS=80
+H=$(( ROWS > 28 ? 22 : ROWS - 6 )); (( H < 12 )) && H=12
+W=$(( COLS > 92 ? 84 : COLS - 8 )); (( W < 56 )) && W=56
+LH=$(( H - 8 )); (( LH < 4 )) && LH=4
+
+# dialog/whiptail draw on stdout and return the result on stderr. fd3 carries
+# the caller's stdout (the capture channel), so UI is pinned to /dev/tty and keys
+# come from /dev/tty even when the script itself arrives on a pipe.
+tui() { "$UI" --title "$APP_TITLE" "$@" 3>&1 1>/dev/tty 2>&3 </dev/tty; }
+
+die() { # message [exit-code]
+  local msg=${1:-failed} rc=${2:-1}
+  trap - ERR
+  printf '%sERR%s %s\n' "$cR" "$c0" "$msg" >&2
+  if (( LOGGING )) && [[ $UI != plain ]]; then
+    { printf 'FAILED: %s\n\n--- last output ---\n' "$msg"
+      tail -n "$H" "$LOG" 2>/dev/null; } > "$LOG.fail"
+    tui --textbox "$LOG.fail" "$H" "$W" || true
+  fi
+  printf 'full log: %s\n' "$LOG" >&2
+  exit "$rc"
+}
+trap 'die "failed at line $LINENO" $?' ERR
+
+# ── tty prompt primitives (plain fallback) ──────────────────
 ask()       { local p="$1" d="${2:-}" v; read -r  -p "$p" v </dev/tty || true; printf '%s' "${v:-$d}"; }
 ask_secret(){ local p="$1" v; read -rs -p "$p" v </dev/tty || true; printf '\n' >&2; printf '%s' "$v"; }
-confirm()   { local v; read -r -p "${1:-proceed?} [type YES] " v </dev/tty || true; [[ $v == YES ]]; }
+plain_pause(){ read -rsn1 -p ' [enter] ' </dev/tty || true; printf '\n' >&2; }
+
+# ── semantic UI: every screen uses these ────────────────────
+ui_msgbox() { # text
+  if [[ $UI == plain ]]; then printf '\n%s\n' "$1" >&2; plain_pause; return 0; fi
+  tui --msgbox "$1" "$H" "$W"
+}
+
+ui_yesno() { # text [default]  (default = yes|no; destructive callers pass no)
+  local text=$1 def=${2:-yes}
+  if [[ $UI == plain ]]; then
+    local suf=' [Y/n]: ' v
+    [[ $def == no ]] && suf=' [y/N]: '
+    read -r -p "$text$suf" v </dev/tty || true
+    v=${v:-$def}
+    [[ ${v,,} == y* ]]
+    return
+  fi
+  local extra=(); [[ $def == no ]] && extra=(--defaultno)
+  tui "${extra[@]}" --yesno "$text" "$H" "$W"
+}
+
+ui_input() { # prompt [default]
+  if [[ $UI == plain ]]; then ask "$1: " "${2:-}"; return; fi
+  tui --inputbox "$1" "$H" "$W" "${2:-}"
+}
+
+ui_password() { # prompt
+  if [[ $UI == plain ]]; then ask_secret "$1: "; return; fi
+  tui --passwordbox "$1" "$H" "$W"
+}
+
+# ui_menu prompt tag description [tag description ...]  -> tag on stdout
+ui_menu() {
+  local prompt=$1; shift
+  if [[ $UI != plain ]]; then tui --menu "$prompt" "$H" "$W" "$LH" "$@"; return; fi
+  local tags=() descs=() t d i=0
+  printf '\n%s\n' "$prompt" >&2
+  while (( $# >= 2 )); do
+    t=$1 d=$2; shift 2; tags+=("$t") descs+=("$d"); i=$((i + 1))
+    printf '  %d) %s [%s]\n' "$i" "$d" "$t" >&2
+  done
+  local pick
+  read -r -p "choose 1-$i: " pick </dev/tty || true
+  [[ -z $pick ]] && pick=1
+  if [[ $pick =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= i )); then
+    printf '%s' "${tags[pick - 1]}"
+  else
+    printf '%s' "$pick"
+  fi
+}
+
+# ui_radio prompt tag description on|off [tag description on|off ...] -> tag
+ui_radio() {
+  local prompt=$1; shift
+  if [[ $UI != plain ]]; then tui --radiolist "$prompt" "$H" "$W" "$LH" "$@"; return; fi
+  local tags=() descs=() def='' t d s i=0
+  printf '\n%s\n' "$prompt" >&2
+  while (( $# >= 3 )); do
+    t=$1 d=$2 s=$3; shift 3; tags+=("$t") descs+=("$d"); i=$((i + 1))
+    [[ $s == on ]] && def=$t
+    printf '  %d) %s [%s]\n' "$i" "$d" "$t" >&2
+  done
+  local pick
+  read -r -p "choose 1-$i (default $def): " pick </dev/tty || true
+  if [[ -z $pick ]]; then printf '%s' "$def"; return 0; fi
+  if [[ $pick =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= i )); then
+    printf '%s' "${tags[pick - 1]}"
+  else
+    printf '%s' "$def"
+  fi
+}
+
+ui_infobox() { [[ $UI == plain ]] && return 0; tui --infobox "$1" "$H" "$W"; }
+step() { say "$*"; ui_infobox "$*"; }
+
+# ── logging around the destructive phase ────────────────────
+start_log() { LOGGING=1; exec 8>&1 9>&2; exec >>"$LOG" 2>&1; }
+stop_log()  { exec >&8 2>&9; LOGGING=0; }
+
+bootstrap_ui() {
+  if [[ -n ${T14S_UI:-} ]]; then          # explicit override
+    UI=$T14S_UI
+    if [[ $UI != plain ]] && ! command -v "$UI" >/dev/null 2>&1; then
+      (( DRYRUN )) || pacman -Sy --needed --noconfirm "$UI" >/dev/null 2>&1 || true
+      command -v "$UI" >/dev/null 2>&1 || UI=plain
+    fi
+    return 0
+  fi
+  [[ -n ${TERM:-} && -r /dev/tty ]] || return 0
+  if command -v whiptail >/dev/null 2>&1; then UI=whiptail
+  elif command -v dialog >/dev/null 2>&1; then UI=dialog
+  elif (( DRYRUN )); then :
+  elif command -v pacman >/dev/null 2>&1 \
+    && pacman -Sy --needed --noconfirm dialog >/dev/null 2>&1 \
+    && command -v dialog >/dev/null 2>&1; then UI=dialog
+  fi
+  [[ $UI == plain ]] && warn "no TUI backend (whiptail/dialog) — plain prompts"
+  return 0
+}
 
 part_of() { # $1 disk, $2 num -> partition path (nvme/mmc need 'p')
   local d="$1" n="$2"
   [[ $d == *nvme* || $d == *mmcblk* || $d == *loop* ]] && printf '%sp%s' "$d" "$n" || printf '%s%s' "$d" "$n"
 }
 
+disk_type() { lsblk -dno TYPE "$1" 2>/dev/null; }
+size_mb()   { local b; b="$(lsblk -bdnro SIZE "$1" 2>/dev/null)"; printf '%s' "$(( ${b:-0} / 1048576 ))"; }
+part_fs()   { lsblk -no FSTYPE "$1" 2>/dev/null | head -1; }
+
+# build_part_menu ARRAY DISK [filter] [exclude]
+#   filter = any | vfat; fills ARRAY with tag/description pairs for ui_menu.
+build_part_menu() {
+  local -n _out=$1
+  local _disk=$2 _filter=${3:-any} _excl=${4:-} typ p sz fs tt
+  _out=()
+  while read -r typ p sz fs tt; do
+    [[ $typ == part ]] || continue
+    [[ -n $_excl && $p == "$_excl" ]] && continue
+    [[ $_filter == vfat && $fs != vfat ]] && continue
+    _out+=("$p" "${sz}  ${fs:-empty}  ${tt:-}")
+  done < <(lsblk -prno TYPE,PATH,SIZE,FSTYPE,PARTTYPENAME "$_disk" 2>/dev/null)
+  _out+=(manual "type a partition path")
+}
+
+# pick_part PROMPT DISK [filter] [exclude] -> partition path on stdout
+pick_part() {
+  local prompt=$1 disk=$2 filter=${3:-any} excl=${4:-}
+  local arr=() ans
+  while :; do
+    build_part_menu arr "$disk" "$filter" "$excl"
+    ans="$(ui_menu "$prompt" "${arr[@]}")" || return 1
+    if [[ $ans == manual ]]; then
+      ans="$(ui_input "Partition path (e.g. /dev/nvme0n1p2)" "")" || return 1
+    fi
+    if [[ -z $ans ]]; then continue; fi
+    if [[ ! -b $ans ]]; then ui_msgbox "Not a block device: $ans"; continue; fi
+    if [[ $(disk_type "$ans") != part ]]; then
+      ui_msgbox "$ans is a whole disk, not a partition."; continue
+    fi
+    printf '%s' "$ans"; return 0
+  done
+}
+
 # ── 0. preflight ────────────────────────────────────────────
-[[ $EUID -eq 0 ]] || die "run as root (from the Arch ISO)"
-[[ -d /sys/firmware/efi/efivars ]] || die "not booted in UEFI mode — enable UEFI and reboot the ISO"
-{ ping -c1 -W3 archlinux.org || curl -fsS --max-time 6 https://archlinux.org; } >/dev/null 2>&1 \
-  || die "no internet — connect first (iwctl / dhcp), then re-run"
-timedatectl set-ntp true || true
+if (( ! DRYRUN )); then
+  [[ $EUID -eq 0 ]] || die "run as root (from the Arch ISO)"
+  [[ -d /sys/firmware/efi/efivars ]] || die "not booted in UEFI mode — enable UEFI and reboot the ISO"
+  { ping -c1 -W3 archlinux.org || curl -fsS --max-time 6 https://archlinux.org; } >/dev/null 2>&1 \
+    || die "no internet — connect first (iwctl / dhcp), then re-run"
+  timedatectl set-ntp true || true
+fi
+bootstrap_ui
 say "preflight ok (UEFI + network + ntp)"
 
 # clean leftover state from a previous interrupted run so re-runs start fresh
 # (otherwise an open cryptroot / mounted /mnt keeps the disk busy → sgdisk/mkfs
-#  can't reformat → stale files survive → pacstrap 'conflicting files')
-umount -R /mnt 2>/dev/null || true
-swapoff -a 2>/dev/null || true
-cryptsetup close cryptroot 2>/dev/null || true
+#  can't reformat → stale files survive → pacstrap 'conflicting files').
+# Never touch mounts/swap during T14S_DRYRUN (safe on a normal host).
+if (( ! DRYRUN )); then
+  umount -R /mnt 2>/dev/null || true
+  swapoff -a 2>/dev/null || true
+  cryptsetup close cryptroot 2>/dev/null || true
+fi
 
-cat <<EOF
+ui_msgbox "T14s Gen 3 AMD ARCH INSTALLER — DESTROYS DATA ON DISK
 
-${cR}╔══════════════════════════════════════════════════════════════╗
-║  T14s Gen 3 AMD ARCH INSTALLER — DESTROYS DATA ON DISK        ║
-╚══════════════════════════════════════════════════════════════╝${c0}
 Machine: ThinkPad T14s Gen 3 AMD (Type 21CQ/21CR) — Rembrandt + amdgpu
 Stack:   LUKS2 + Btrfs(+@tmp) + linux-lts/hardened + UKI + systemd-boot
          + minimal GNOME + zram + AppArmor + UFW + Snapper + Secure Boot
-EOF
+
+All answers are read from /dev/tty. Nothing changes until the final confirm."
 
 # Soft DMI check — Gen 3 AMD types only (21CQ/21CR). Anchored to avoid substring noise.
 _dmi="$(cat /sys/class/dmi/id/product_family /sys/class/dmi/id/product_version \
           /sys/class/dmi/id/product_name /sys/class/dmi/id/product_sku 2>/dev/null \
         | tr '\n' ' ')"
 if ! echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
-  warn "DMI is not T14s Gen 3 AMD type 21CQ/21CR: ${_dmi:-unknown}"
-  warn "Continue only if intentional (VM rehearsal / forced). Wrong machine? Abort."
-  confirm "continue on this hardware anyway?" || die "aborted — this installer is for type 21CQ/21CR only"
+  ui_yesno "DMI is NOT T14s Gen 3 AMD type 21CQ/21CR:
+${_dmi:-unknown}
+
+Continue only if intentional (VM rehearsal / forced). Wrong machine? Abort." no \
+    || die "aborted — this installer is for type 21CQ/21CR only"
 fi
 if ! grep -q AuthenticAMD /proc/cpuinfo; then
-  warn "CPU is not AuthenticAMD — this installer sets amd-ucode + amd_iommu/amd_pstate."
-  confirm "continue without an AMD CPU (VM rehearsal)?" || die "aborted — need AuthenticAMD or explicit YES"
+  ui_yesno "CPU is not AuthenticAMD.
+This installer sets amd-ucode + amd_iommu/amd_pstate.
+
+Continue without an AMD CPU (VM rehearsal)?" no \
+    || die "aborted — need AuthenticAMD or explicit YES"
 fi
 ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
 
 # ── 1. choose disk ──────────────────────────────────────────
-say "block devices:"; lsblk -dpo NAME,SIZE,MODEL | grep -vE 'loop|sr0' || true
-DISK="$(ask 'Target disk (e.g. /dev/nvme0n1): ')"
-[[ -b $DISK ]] || die "not a block device: $DISK"
+while :; do
+  mapfile -t DISKS < <(lsblk -dno PATH,TYPE 2>/dev/null | awk '$2 == "disk" { print $1 }')
+  menu_args=()
+  for d in "${DISKS[@]}"; do
+    [[ -b $d ]] || continue
+    menu_args+=("$d" "$(lsblk -dnro SIZE,MODEL "$d" 2>/dev/null | sed 's/  */ /g')")
+  done
+  menu_args+=("manual" "type a device path")
+
+  DISK="$(ui_menu "Select the target disk. AUTO wipes it entirely." "${menu_args[@]}")" \
+    || die "no disk selected"
+  if [[ $DISK == manual ]]; then
+    DISK="$(ui_input "Target disk (e.g. /dev/nvme0n1)" "")" || die "no disk selected"
+  fi
+  [[ -b $DISK ]] || { ui_msgbox "Not a block device: ${DISK:-<empty>}"; continue; }
+  [[ $(disk_type "$DISK") == disk ]] || { ui_msgbox "$DISK is not a whole disk."; continue; }
+  break
+done
 
 # ── 2. partition strategy ───────────────────────────────────
-echo
-say "partition mode:"
-echo "  1) AUTO  — wipe ALL of $DISK, create 2G EFI + LUKS root"
-echo "  2) MANUAL — pick existing partitions (EFI optional: format or reuse)"
-MODE="$(ask 'choose [1/2]: ' 1)"
+MODE="$(ui_radio "How should $DISK be partitioned?" \
+  auto "wipe ALL of $DISK: EFI + LUKS root" on \
+  manual "select existing partitions (EFI format or reuse)" off)" || die "aborted"
 
 FORMAT_EFI=1
-if [[ $MODE == 1 ]]; then
-  warn "AUTO mode ERASES the ENTIRE disk $DISK — including any Windows / other-OS partitions on it."
-  lsblk "$DISK" || true
-  echo "Type the disk path to confirm total wipe:"
-  [[ "$(ask 'confirm disk: ')" == "$DISK" ]] || die "disk confirmation mismatch — aborting"
-  confirm "ERASE $DISK now?" || die "aborted"
-  say "partitioning $DISK (GPT: 2G ESP + LUKS)"
-  sgdisk --zap-all "$DISK" >/dev/null
-  sgdisk -n1:0:+2G   -t1:ef00 -c1:EFI       "$DISK" >/dev/null
-  sgdisk -n2:0:0     -t2:8309 -c2:cryptroot "$DISK" >/dev/null
-  partprobe "$DISK"; udevadm settle 2>/dev/null || sleep 2
+if [[ $MODE == auto ]]; then
+  while :; do
+    ESP_MB="$(ui_radio "EFI system partition size on $DISK" \
+      2048 "2G — recommended for dual UKIs" on \
+      1024 "1G — minimum comfortable" off \
+      4096 "4G — extra multiboot headroom" off)" || die "aborted"
+    disk_mb="$(size_mb "$DISK")"
+    (( disk_mb > ESP_MB + 8192 )) && break
+    ui_msgbox "Disk is only ${disk_mb}MB — ${ESP_MB}MB ESP plus an 8GB root will not fit.
+Pick a smaller ESP."
+  done
+
+  ui_msgbox "AUTO mode ERASES the ENTIRE disk:
+
+$DISK
+
+Plan: GPT · ${ESP_MB}MB ESP (FAT32) · remainder LUKS2 + Btrfs
+
+That includes any Windows / other-OS partitions on it.
+
+$(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
+  CONF="$(ui_input "Type the disk path to confirm total wipe" "")" || die "aborted"
+  [[ $CONF == "$DISK" ]] || die "disk confirmation mismatch — aborting"
+  ui_yesno "ERASE $DISK now?" no || die "aborted"
+  # names only; the destructive writes run in the execute phase
   EFI_PART="$(part_of "$DISK" 1)"
   ROOT_PART="$(part_of "$DISK" 2)"
 else
-  say "current layout:"; lsblk -po NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" || true
-  ROOT_PART="$(ask 'ROOT partition to LUKS-format (e.g. /dev/nvme0n1p2): ')"
-  [[ -b $ROOT_PART ]] || die "not a partition: $ROOT_PART"
-  echo "EFI options:  1) format a partition as ESP   2) reuse existing ESP (no format — multiboot)"
-  EFIMODE="$(ask 'choose [1/2]: ' 2)"
-  EFI_PART="$(ask 'EFI partition (e.g. /dev/nvme0n1p1): ')"
-  [[ -b $EFI_PART ]] || die "not a partition: $EFI_PART"
-  [[ $EFI_PART != "$ROOT_PART" ]] || die "EFI and ROOT cannot be the same partition"
-  [[ $EFIMODE == 2 ]] && FORMAT_EFI=0
-  efifs="$(lsblk -no FSTYPE "$EFI_PART" 2>/dev/null | head -1)"
-  if [[ $FORMAT_EFI == 0 ]]; then
-    # reuse: must already be a FAT ESP — never format a shared/multiboot ESP
-    [[ $efifs == vfat ]] || die "reuse needs an existing FAT32 ESP — $EFI_PART is '${efifs:-empty}'. Use option 1 to format, or pick the real ESP."
-    say "reuse ESP $EFI_PART (FAT, kept). Existing /EFI entries (other OSes stay bootable):"
+  ui_msgbox "Manual partitioning on $DISK.
+
+Current layout (select from lists; sizes and existing filesystems shown):
+
+$(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
+
+  ROOT_PART="$(pick_part "Select ROOT — ERASED, becomes LUKS2 + Btrfs" "$DISK")" \
+    || die "aborted"
+  while :; do
+    EFIMODE="$(ui_radio "EFI handling for $ROOT_PART" \
+      reuse "keep an existing FAT32 ESP (multiboot-safe)" on \
+      format "format a partition as ESP (destroys its contents)" off)" || die "aborted"
+    if [[ $EFIMODE == reuse ]]; then FORMAT_EFI=0; else FORMAT_EFI=1; fi
+
+    if (( FORMAT_EFI == 0 )) && ! lsblk -prno FSTYPE "$DISK" 2>/dev/null | grep -qx vfat; then
+      ui_msgbox "No FAT32 ESP exists on $DISK. Pick format mode instead (or cancel to abort)."
+      continue
+    fi
+
+    if (( FORMAT_EFI == 0 )); then
+      EFI_PART="$(pick_part "Select the existing ESP (must be FAT32)" "$DISK" any "$ROOT_PART")" \
+        || die "aborted"
+    else
+      EFI_PART="$(pick_part "Select the partition to FORMAT as ESP" "$DISK" any "$ROOT_PART")" \
+        || die "aborted"
+    fi
+    [[ $EFI_PART != "$ROOT_PART" ]] || { ui_msgbox "EFI and ROOT cannot be the same partition."; continue; }
+
+    efifs="$(part_fs "$EFI_PART")"
+    if (( FORMAT_EFI == 0 )) && [[ $efifs != vfat ]]; then
+      ui_msgbox "$EFI_PART is '${efifs:-empty}', not FAT32 — reuse needs an existing ESP.
+Pick format mode or another partition."
+      continue
+    fi
+    efi_mb="$(size_mb "$EFI_PART")"
+    if (( efi_mb < 512 )); then
+      ui_yesno "ESP $EFI_PART is only ${efi_mb}MB. Dual UKIs will not fit.
+Use it anyway?" no || continue
+    elif (( efi_mb < 1024 )); then
+      ui_msgbox "Note: ESP is ${efi_mb}MB — 1G+ is recommended for dual UKIs."
+    fi
+    break
+  done
+
+  root_mb="$(size_mb "$ROOT_PART")"
+  if (( root_mb < 8192 )); then
+    ui_yesno "ROOT $ROOT_PART is only ${root_mb}MB — 8G+ is recommended.
+Use it anyway?" no || die "aborted"
+  fi
+
+  if (( FORMAT_EFI == 0 )); then
     _m="$(mktemp -d)"
+    _esp_entries=""
     if mount -o ro "$EFI_PART" "$_m" 2>/dev/null; then
-      find "$_m/EFI" -maxdepth 1 -mindepth 1 2>/dev/null | sed 's,^,   ,' || true
+      _esp_entries="$(find "$_m/EFI" -maxdepth 1 -mindepth 1 2>/dev/null | sed 's,.*/,   ,' || true)"
       umount "$_m" || true
     fi
     rmdir "$_m" 2>/dev/null || true
-  else
-    # format mode: hard-warn if the target already looks like a live ESP
-    [[ $efifs == vfat ]] && warn "DANGER: $EFI_PART is ALREADY FAT — likely a shared ESP. Formatting ERASES other OSes' bootloaders."
+    ui_msgbox "Reusing ESP $EFI_PART (FAT, kept).
+
+Existing /EFI entries (other OSes stay bootable):
+${_esp_entries:-   (none)}"
+  elif [[ $efifs == vfat ]]; then
+    ui_msgbox "DANGER: $EFI_PART is ALREADY FAT — likely a shared ESP.
+Formatting ERASES other OSes' bootloaders."
   fi
-  warn "ROOT $ROOT_PART will be ERASED (LUKS format)."
-  [[ $FORMAT_EFI == 1 ]] && warn "EFI $EFI_PART will be FORMATTED (FAT32)." || say "EFI $EFI_PART will be REUSED (kept, multiboot-safe)."
-  confirm "proceed with these partitions?" || die "aborted"
+
+  ui_yesno "Proceed with these partitions?
+
+  ROOT  $ROOT_PART  $(size_mb "$ROOT_PART")MB  ERASED → LUKS2
+  EFI   $EFI_PART  ${efi_mb}MB  $([[ $FORMAT_EFI == 1 ]] && echo FORMATTED || echo REUSED)" no \
+    || die "aborted"
 fi
 ok "EFI=$EFI_PART  ROOT=$ROOT_PART  (format_efi=$FORMAT_EFI)"
 
 # ── 3. luks passphrase ──────────────────────────────────────
 while :; do
-  LUKS_PASS="$(ask_secret 'LUKS passphrase: ')"
-  LUKS_PASS2="$(ask_secret 'repeat passphrase: ')"
+  LUKS_PASS="$(ui_password 'LUKS passphrase')" || die "aborted"
+  LUKS_PASS2="$(ui_password 'Repeat LUKS passphrase')" || die "aborted"
   [[ -n $LUKS_PASS && $LUKS_PASS == "$LUKS_PASS2" ]] && break
-  warn "empty or mismatch — retry"
+  ui_msgbox "Empty or mismatched LUKS passphrase — retry."
 done
 
 # ── 4. identity ─────────────────────────────────────────────
-HOSTNAME="$(ask 'hostname: ' thinkpad-t14s)"
+HOSTNAME="$(ui_input "Hostname" thinkpad-t14s)" || die "aborted"
 [[ -n $HOSTNAME ]] || die "hostname cannot be empty"
-TIMEZONE="$(ask 'timezone (Region/City): ' America/New_York)"
-LOCALE="$(ask 'locale: ' en_US.UTF-8)"
-KEYMAP="$(ask 'console keymap: ' us)"
+TIMEZONE="$(ui_input "Timezone (Region/City)" America/New_York)" || die "aborted"
+LOCALE="$(ui_input "Locale" en_US.UTF-8)" || die "aborted"
+KEYMAP="$(ui_input "Console keymap" us)" || die "aborted"
 while :; do
-  USERNAME="$(ask 'username: ')"
+  USERNAME="$(ui_input "Username (lowercase POSIX)" "")" || die "aborted"
   if [[ -z $USERNAME ]]; then
-    warn "username cannot be empty"
+    ui_msgbox "username cannot be empty"
   elif [[ $USERNAME == root ]]; then
-    warn "username cannot be 'root'"
+    ui_msgbox "username cannot be 'root'"
   elif ! [[ $USERNAME =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-    warn "username must match ^[a-z_][a-z0-9_-]*$ (lowercase POSIX)"
+    ui_msgbox "username must match ^[a-z_][a-z0-9_-]*$ (lowercase POSIX)"
   else
     break
   fi
 done
 while :; do
-  USER_PASS="$(ask_secret "password for $USERNAME: ")"
-  USER_PASS2="$(ask_secret 'repeat: ')"
-  [[ -n $USER_PASS && $USER_PASS == "$USER_PASS2" ]] && break; warn "mismatch — retry"
+  USER_PASS="$(ui_password "Password for $USERNAME")" || die "aborted"
+  USER_PASS2="$(ui_password "Repeat password for $USERNAME")" || die "aborted"
+  [[ -n $USER_PASS && $USER_PASS == "$USER_PASS2" ]] && break
+  ui_msgbox "Empty or mismatched password — retry."
 done
 while :; do
-  ROOT_PASS="$(ask_secret 'root password: ')"
-  ROOT_PASS2="$(ask_secret 'repeat: ')"
-  [[ -n $ROOT_PASS && $ROOT_PASS == "$ROOT_PASS2" ]] && break; warn "mismatch — retry"
+  ROOT_PASS="$(ui_password 'Root password')" || die "aborted"
+  ROOT_PASS2="$(ui_password 'Repeat root password')" || die "aborted"
+  [[ -n $ROOT_PASS && $ROOT_PASS == "$ROOT_PASS2" ]] && break
+  ui_msgbox "Empty or mismatched password — retry."
 done
 unset -v LUKS_PASS2 USER_PASS2 ROOT_PASS2
 
-DESKTOP="$(ask 'install minimal GNOME desktop? [Y/n]: ' Y)"
-ENROLL_SB="$(ask 'enroll Secure Boot keys now if firmware in Setup Mode? [y/N]: ' N)"
+ui_yesno "Install the minimal GNOME desktop, browsers, VPN and software center?" yes \
+  && DESKTOP=Y || DESKTOP=N
+ui_yesno "Enroll Secure Boot keys now if the firmware is in Setup Mode?" no \
+  && ENROLL_SB=Y || ENROLL_SB=N
+
+# ── final summary ───────────────────────────────────────────
+ui_msgbox "REVIEW — nothing has been written yet.
+
+  Disk          $DISK $(size_mb "$DISK")MB ($([[ $MODE == auto ]] && echo "AUTO wipe, ${ESP_MB}MB ESP" || echo manual))
+  EFI           $EFI_PART $(size_mb "$EFI_PART")MB ($([[ $FORMAT_EFI == 1 ]] && echo format || echo reuse))
+  ROOT          $ROOT_PART $(size_mb "$ROOT_PART")MB (LUKS2, will be erased)
+  Hostname      $HOSTNAME
+  Timezone      $TIMEZONE
+  Locale        $LOCALE
+  Keymap        $KEYMAP
+  User          $USERNAME
+  Desktop       $([[ $DESKTOP == Y ]] && echo 'minimal GNOME' || echo none)
+  Secure Boot   $([[ $ENROLL_SB == Y ]] && echo 'enroll keys now' || echo 'enroll later')
+
+Typed passwords are not redisplayed."
+
+ui_yesno "Start the installation? The partitions above will be ERASED." no \
+  || die "aborted by user"
+
+if (( DRYRUN )); then
+  printf 'DRYRUN: EFI=%s ROOT=%s format_efi=%s esp_mb=%s host=%s user=%s desktop=%s sb=%s\n' \
+    "$EFI_PART" "$ROOT_PART" "$FORMAT_EFI" "${ESP_MB:-}" "$HOSTNAME" "$USERNAME" "$DESKTOP" "$ENROLL_SB"
+  exit 0
+fi
+
+start_log
+
+# ── 4b. write the partition table (AUTO only) ───────────────
+if [[ $MODE == auto ]]; then
+  step "partitioning $DISK (GPT: 2G ESP + LUKS)"
+  sgdisk --zap-all "$DISK" >/dev/null
+  sgdisk -n1:0:+"${ESP_MB}"M -t1:ef00 -c1:EFI "$DISK" >/dev/null
+  sgdisk -n2:0:0     -t2:8309 -c2:cryptroot "$DISK" >/dev/null
+  partprobe "$DISK"; udevadm settle 2>/dev/null || sleep 2
+fi
 
 # ── 5. encrypt + filesystems ────────────────────────────────
-say "LUKS2 format (argon2id) on $ROOT_PART"
+step "LUKS2 format (argon2id) on $ROOT_PART"
 wipefs -a "$ROOT_PART" >/dev/null 2>&1 || true   # clear stale signatures (dirty/reused disk)
 printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --pbkdf argon2id --batch-mode "$ROOT_PART" -
 printf '%s' "$LUKS_PASS" | cryptsetup open "$ROOT_PART" cryptroot -
@@ -183,7 +477,7 @@ LUKS_UUID="$(cryptsetup luksUUID "$ROOT_PART")"   # LUKS header UUID (for rd.luk
 [[ -n $LUKS_UUID ]] || die "could not read LUKS UUID from $ROOT_PART"
 ok "LUKS open as /dev/mapper/cryptroot (LUKS UUID=$LUKS_UUID)"
 
-say "btrfs + subvolumes"
+step "btrfs + subvolumes"
 mkfs.btrfs -f -L archroot /dev/mapper/cryptroot >/dev/null
 mount /dev/mapper/cryptroot /mnt
 for sv in @ @home @snapshots @var_log @var_cache @tmp; do btrfs subvolume create "/mnt/$sv" >/dev/null; done
@@ -201,7 +495,7 @@ mount -o "noatime,nodatacow,nosuid,nodev,subvol=@tmp" /dev/mapper/cryptroot /mnt
 chmod 1777 /mnt/tmp
 
 if [[ $FORMAT_EFI == 1 ]]; then
-  say "format ESP $EFI_PART"
+  step "format ESP $EFI_PART"
   wipefs -a "$EFI_PART" >/dev/null 2>&1 || true   # clear stale fs signatures that confuse blkid/mount
   mkfs.fat -F32 -n EFI "$EFI_PART"                 # show output — surface real errors
   sync
@@ -213,7 +507,7 @@ esp_mb=$(df -Pm /mnt/boot | awk 'NR==2{print $2}'); esp_mb=${esp_mb:-0}
 # defensive: drop leftover Arch boot files from a prior install so pacstrap won't hit
 # 'conflicting files'. Clears both ucode names for multiboot ESP hygiene (this
 # installer only pacstraps amd-ucode; intel-ucode.img removal is intentional).
-say "cleaning prior Arch boot artifacts on ESP"
+step "cleaning prior Arch boot artifacts on ESP"
 rm -f /mnt/boot/intel-ucode.img /mnt/boot/amd-ucode.img \
       /mnt/boot/vmlinuz-linux* /mnt/boot/initramfs-linux* \
       /mnt/boot/EFI/Linux/arch-linux*.efi 2>/dev/null || true
@@ -227,14 +521,28 @@ ok "filesystems mounted (ESP ${esp_mb}MB)"
 # Rembrandt target — always amd-ucode (non-AMD already confirmed at preflight).
 UCODE=amd-ucode
 
-say "refreshing live mirrors (best-effort)"
-reflector --latest 20 --protocol https --sort rate --download-timeout 5 \
-  --save /etc/pacman.d/mirrorlist 2>/dev/null || warn "reflector skipped — using current mirrorlist"
+# Reflector rates every candidate mirror by downloading its repo DB. Without
+# --threads that loop is serial, so a handful of dead mirrors stall the install
+# for minutes behind a blank screen. Bound it: few candidates, concurrent rating,
+# short timeouts, hard overall deadline. Write to a temp file first so a killed or
+# empty run never clobbers a usable mirrorlist.
+step "refreshing live mirrors (best-effort, time-bounded)"
+ML_TMP="$(mktemp)"
+if timeout 45 reflector --latest 10 --protocol https --sort rate \
+     --threads 5 --connection-timeout 3 --download-timeout 5 \
+     --save "$ML_TMP" 2>/dev/null \
+   && (( $(grep -c '^Server' "$ML_TMP") >= 3 )); then
+  cat "$ML_TMP" > /etc/pacman.d/mirrorlist   # keep existing inode/perms (0644)
+  ok "mirrorlist refreshed ($(grep -c '^Server' "$ML_TMP") mirrors)"
+else
+  warn "reflector skipped, timed out, or returned too few mirrors — keeping current mirrorlist"
+fi
+rm -f "$ML_TMP"
 
 # Robust downloads: route pacman through curl with retries + resume and NO
 # low-speed abort, so a slow mirror stalls but doesn't kill the transaction
 # (the default libcurl path aborts with "Operation too slow"). Failover across
-# the 20 reflector mirrors still applies. Single pacstrap — no retry loop, which
+# the reflector mirrorlist still applies. Single pacstrap — no retry loop, which
 # would re-run on a partially-populated root and hit 'conflicting files'.
 if ! grep -q '^XferCommand' /etc/pacman.conf; then
   sed -i '/^\[options\]/a XferCommand = /usr/bin/curl -fL -C - -o %o %u --retry 5 --retry-connrefused --connect-timeout 15' /etc/pacman.conf
@@ -251,17 +559,17 @@ BASE_PKGS=(
   mkinitcpio snapper snap-pac zram-generator
   apparmor ufw sbctl efibootmgr
 )
-say "pacstrap base system ($UCODE)"
+step "pacstrap base system ($UCODE)"
 pacstrap -K /mnt "${BASE_PKGS[@]}"
 
-say "genfstab"
+step "genfstab"
 genfstab -U /mnt >> /mnt/etc/fstab
 # add nofail to the /tmp line (failure must not block boot)
 sed -i -E '/[[:space:]]\/tmp[[:space:]]+btrfs/ s/(subvol=\/?@tmp)/\1,nofail/' /mnt/etc/fstab || true
 ok "base installed"
 
 # ── 7. chroot configuration ─────────────────────────────────
-say "writing chroot config"
+step "writing chroot config"
 cat > /mnt/root/chroot-setup.sh <<'CHROOT'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -302,6 +610,58 @@ mkdir -p /etc/kernel
 # AMD Rembrandt: amd_iommu + amd_pstate (no intel_iommu / i915). BIOS Sleep =
 # "Windows and Linux" pairs with mem_sleep_default=s2idle.
 echo "rd.luks.name=${LUKS_UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle apparmor=1 security=apparmor amd_iommu=on amd_pstate=active" > /etc/kernel/cmdline
+
+# Charge window 70–80. tmpfiles can race before thinkpad_acpi exposes BAT*;
+# oneshot After=multi-user.target waits/retries. No-op on VM without BAT.
+mkdir -p /etc/tmpfiles.d /usr/local/lib/t14s
+cat > /etc/tmpfiles.d/thinkpad-charge-thresholds.conf <<'EOF'
+# ThinkPad charge thresholds 70–80 (PPD host; no TLP).
+# Best-effort at boot; see thinkpad-charge-thresholds.service if BAT* appears late.
+w /sys/class/power_supply/BAT0/charge_control_start_threshold - - - - 70
+w /sys/class/power_supply/BAT0/charge_control_end_threshold - - - - 80
+EOF
+cat > /usr/local/lib/t14s/apply-charge-thresholds.sh <<'EOF'
+#!/usr/bin/env bash
+# Wait for thinkpad_acpi BAT* charge_control_*, then apply 70–80. Exit 0 if absent (VM).
+set -euo pipefail
+START=70 END=80
+for _ in $(seq 1 60); do
+  shopt -s nullglob
+  found=(/sys/class/power_supply/BAT*/charge_control_end_threshold)
+  shopt -u nullglob
+  ((${#found[@]} > 0)) && break
+  sleep 1
+done
+shopt -s nullglob
+for bat in /sys/class/power_supply/BAT*; do
+  [[ -d $bat ]] || continue
+  if [[ -e $bat/charge_control_start_threshold ]]; then
+    printf '%s\n' "$START" >"$bat/charge_control_start_threshold" || true
+  fi
+  if [[ -e $bat/charge_control_end_threshold ]]; then
+    printf '%s\n' "$END" >"$bat/charge_control_end_threshold" || true
+  fi
+done
+shopt -u nullglob
+exit 0
+EOF
+chmod 755 /usr/local/lib/t14s/apply-charge-thresholds.sh
+cat > /etc/systemd/system/thinkpad-charge-thresholds.service <<'EOF'
+[Unit]
+Description=ThinkPad battery charge thresholds (70-80)
+Documentation=file:///usr/local/lib/t14s/apply-charge-thresholds.sh
+After=multi-user.target
+# Do not use ConditionPathExists*: BAT* may appear after early boot.
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/t14s/apply-charge-thresholds.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable thinkpad-charge-thresholds.service
 
 # UKI presets: linux-lts (primary) + linux-hardened (fallback)
 # reuse ESP: clear stale UKIs + loader entries before rebuild (multiboot-safe names)
@@ -391,11 +751,14 @@ ufw default allow outgoing
 ufw --force enable >/dev/null 2>&1 || true
 grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null || sed -i 's/^ENABLED=.*/ENABLED=yes/' /etc/ufw/ufw.conf 2>/dev/null || true
 
-# reflector mirrors
+# reflector mirrors (weekly timer; rate-rating must not serialize on dead mirrors)
 cat > /etc/xdg/reflector/reflector.conf <<EOF
 --latest 10
 --protocol https
 --sort rate
+--threads 5
+--connection-timeout 3
+--download-timeout 5
 --save /etc/pacman.d/mirrorlist
 EOF
 
@@ -421,8 +784,9 @@ fi
 # minimal GNOME (optional)
 if [[ ${DESKTOP^^} != N* ]]; then
   say "installing minimal GNOME + browsers + VPN + software center"
-  # sof-firmware+alsa-ucm-conf: Rembrandt audio. fprintd: power-button match-on-chip
-  # FP (D-Bus-activated — do NOT systemctl enable). No Yoga tablet / iio rotate.
+  # sof-firmware+alsa-ucm-conf: Rembrandt audio.
+  # mesa+vulkan-radeon+fprintd: Radeon 680M (libva via mesa Provides). No Yoga / iio.
+  # FP (D-Bus-activated — do NOT systemctl enable).
   # browsers + proton-vpn: Flatpak. gnome-software: Flatpak software center.
   # Non-fatal: a network hiccup here must not abort an otherwise-bootable base system.
   if pacman -S --noconfirm --needed --disable-download-timeout \
@@ -433,6 +797,7 @@ if [[ ${DESKTOP^^} != N* ]]; then
     flatpak fwupd bolt pipewire pipewire-pulse wireplumber earlyoom \
     power-profiles-daemon \
     sof-firmware alsa-ucm-conf fprintd \
+    mesa vulkan-radeon \
     gnome-software
   then
     systemctl enable gdm bolt.service earlyoom.service power-profiles-daemon
@@ -485,12 +850,12 @@ chmod 600 /mnt/root/.t14s-install-secrets
 unset -v USER_PASS ROOT_PASS
 
 chmod +x /mnt/root/chroot-setup.sh
-say "running chroot config"
 cleanup_chroot_secrets() {
   shred -u /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets 2>/dev/null \
     || rm -f /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets
 }
 # Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
+step "running chroot config"
 if ! arch-chroot /mnt env \
   TIMEZONE="$TIMEZONE" LOCALE="$LOCALE" KEYMAP="$KEYMAP" HOSTNAME="$HOSTNAME" \
   USERNAME="$USERNAME" \
@@ -504,10 +869,6 @@ cleanup_chroot_secrets
 ok "chroot config complete"
 
 # ── 8. finish ───────────────────────────────────────────────
-say "unmounting"
-umount -R /mnt
-cryptsetup close cryptroot
-
 if [[ ${DESKTOP^^} != N* ]]; then
   LOGIN_HINT="First login via GDM (Wayland)."
   FLATPAK_HINT="Optional post-boot: flatpak install --system -y flathub com.google.Chrome"
@@ -516,26 +877,35 @@ else
   FLATPAK_HINT="Optional later: pacman -S gnome-shell gdm flatpak && systemctl enable gdm"
 fi
 
-cat <<EOF
+POST_TXT="T14s install — next steps
 
-${cG}╔══════════════════════════════════════════════════════════════╗
-║  T14s Gen 3 AMD — INSTALL COMPLETE                            ║
-╚══════════════════════════════════════════════════════════════╝${c0}
- • Reboot, remove the ISO:   ${cY}reboot${c0}
- • Boot menu: Arch Linux (LTS) default · Hardened as fallback.
- • Verify after boot: ${cY}lscpu | grep -i ryzen${c0} · ${cY}cat /sys/power/mem_sleep${c0}
-   (expect s2idle bracketed; BIOS Sleep = Windows and Linux).
- • Secure Boot: keys created + binaries signed. To ENABLE:
-     1) BIOS → clear Secure Boot keys → Setup Mode
-     2) booted OS:  ${cY}sudo sbctl enroll-keys -m${c0}
-     3) BIOS → Secure Boot → Enabled   (pacman hook auto-resigns on updates)
-     ${cY}multiboot:${c0} '-m' keeps Microsoft keys so Windows still boots; other
-     unsigned Linux loaders won't boot under SB until you 'sbctl sign' them.
- • linux-hardened + Flatpak: userns sysctl already set (99-userns.conf).
- • Hostname: ${cY}${HOSTNAME}${c0}
- • ${LOGIN_HINT}
- • Post-boot checks:
-     ${cY}grep -E 'amd_iommu|amd_pstate' /proc/cmdline${c0}
- • ${FLATPAK_HINT}
-EOF
+  Reboot and remove the ISO:   reboot
+  Boot menu: Arch Linux (LTS) default, Hardened as fallback.
+  Verify after boot: lscpu | grep -i ryzen
+                     cat /sys/power/mem_sleep   (expect s2idle bracketed)
+  Secure Boot (to enable):
+    1) BIOS -> clear Secure Boot keys -> Setup Mode
+    2) booted OS: sudo sbctl enroll-keys -m
+    3) BIOS -> Secure Boot -> Enabled   (pacman hook auto-resigns on updates)
+    multiboot: '-m' keeps Microsoft keys so Windows still boots; other
+    unsigned Linux loaders won't boot under SB until you 'sbctl sign' them.
+  linux-hardened + Flatpak: userns sysctl already set (99-userns.conf).
+  Hostname: ${HOSTNAME}
+  ${LOGIN_HINT}
+  Post-boot check: grep -E 'amd_iommu|amd_pstate' /proc/cmdline
+  Charge thresholds (ThinkPad BAT* only; skip/absent on VM):
+    cat /sys/class/power_supply/BAT0/charge_control_*_threshold
+    (expect 70 / 80; oneshot thinkpad-charge-thresholds.service + tmpfiles)
+  ${FLATPAK_HINT}"
+
+printf '%s\n' "$POST_TXT" > /mnt/root/t14s-post-install.txt
+
+step "unmounting"
+umount -R /mnt
+cryptsetup close cryptroot
+stop_log
+
+ui_msgbox "INSTALL COMPLETE — reboot and remove the ISO.
+
+$(printf '%s' "$POST_TXT")"
 ok "done — reboot when ready"
