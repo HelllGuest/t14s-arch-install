@@ -202,7 +202,11 @@ bash install.sh
 Required in answers: `DISK`, `MODE`, identity (`HOSTNAME` `TIMEZONE` `LOCALE`
 `KEYMAP` `USERNAME`), and for AUTO also `ESP_MB` (`1024|2048|4096`). MANUAL
 also needs `EFI_PART` / `ROOT_PART` on that same `DISK` (ESP ≥512 MB,
-ROOT ≥8 GB). `FORMAT_EFI` optional (`0` reuse / `1` format; default `1`).
+ROOT ≥8 GB). Identity is checked **before** wipe/LUKS: hostname DNS labels,
+username POSIX ≤32 and not an existing user/group, timezone path + TZif
+(not Factory/leapseconds/…), locale in SUPPORTED/`locale.gen`, keymap via
+`localectl` or an exact on-disk map name.
+`FORMAT_EFI` optional (`0` reuse / `1` format; default `1`).
 `LUKS_WIPE` must be `none|fast|normal` (default `none`).
 `PACMAN_PARALLEL` / `BTRFS_COMPRESS` / `ZRAM_SIZE` optional but must be valid
 if set (defaults `10` / `zstd3` / `half`).

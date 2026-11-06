@@ -837,6 +837,77 @@ part_of() { # $1 disk, $2 num -> partition path (nvme/mmc need 'p')
   [[ $d == *nvme* || $d == *mmcblk* || $d == *loop* ]] && printf '%sp%s' "$d" "$n" || printf '%s%s' "$d" "$n"
 }
 
+# Identity validators (before wipe).
+# Test fixtures only when T14S_IDENTITY_OVERRIDES=1: LOCALE_FILES, KEYMAP_DIR.
+valid_hostname() {
+  local h="$1"
+  # Single label or dotted FQDN; no leading/trailing hyphen or dot per label.
+  [[ $h =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]
+}
+
+valid_username() {
+  local u="$1"
+  [[ $u =~ ^[a-z_][a-z0-9_-]*$ ]] || return 1
+  (( ${#u} <= 32 )) || return 1
+  # Reject names already in passwd or group (root/bin/nobody/wheel on the ISO).
+  id "$u" &>/dev/null && return 1
+  getent group "$u" >/dev/null 2>&1 && return 1
+  return 0
+}
+
+valid_timezone() {
+  local tz="$1" f magic
+  [[ $tz != *..* ]] || return 1
+  [[ $tz =~ ^[A-Za-z_]+(/[A-Za-z0-9_+-]+)*$ ]] || return 1
+  # TZif junk / non-zone files that sit under zoneinfo.
+  case $tz in
+    Factory|leapseconds|posixrules|localtime|iso3166.tab|zone.tab|zonenow.tab|tzdata.zi) return 1 ;;
+  esac
+  f="/usr/share/zoneinfo/$tz"
+  [[ -f $f ]] || return 1
+  magic="$(head -c4 "$f" 2>/dev/null || true)"
+  [[ $magic == TZif ]]
+}
+
+valid_locale() {
+  local loc="$1" f line name
+  local -a files=()
+  [[ -n $loc ]] || return 1
+  if [[ ${T14S_IDENTITY_OVERRIDES:-0} == 1 && -n ${LOCALE_FILES:-} ]]; then
+    # shellcheck disable=SC2206
+    files=(${LOCALE_FILES})
+  else
+    files=(/usr/share/i18n/SUPPORTED /etc/locale.gen)
+  fi
+  for f in "${files[@]}"; do
+    [[ -r $f ]] || continue
+    while read -r line || [[ -n $line ]]; do
+      [[ $line =~ ^[[:space:]]*#?([A-Za-z0-9_.@-]+)[[:space:]] ]] || continue
+      name="${BASH_REMATCH[1]}"
+      [[ $name == "$loc" ]] && return 0
+    done <"$f"
+  done
+  return 1
+}
+
+valid_keymap() {
+  local km="$1" root=/usr/share/kbd/keymaps
+  # Literal name only — never pass glob/regex metacharacters to find/grep.
+  [[ $km =~ ^[A-Za-z0-9_.+-]+$ ]] || return 1
+  if [[ ${T14S_IDENTITY_OVERRIDES:-0} == 1 && -n ${KEYMAP_DIR:-} ]]; then
+    root="$KEYMAP_DIR"
+  fi
+  [[ -d $root ]] || return 1
+  if command -v localectl >/dev/null 2>&1; then
+    localectl list-keymaps 2>/dev/null | grep -qxF -- "$km" && return 0
+    # Not listed: still accept an exact on-disk map (browse path). Charset is safe.
+  fi
+  find "$root" -type f \
+    \( -name "${km}.map" -o -name "${km}.map.gz" \
+       -o -name "${km}.kmap" -o -name "${km}.kmap.gz" \) \
+    2>/dev/null | grep -q .
+}
+
 disk_type() { lsblk -dno TYPE "$1" 2>/dev/null; }
 size_mb()   { local b; b="$(lsblk -bdnro SIZE "$1" 2>/dev/null)"; printf '%s' "$(( ${b:-0} / 1048576 ))"; }
 part_fs()   { lsblk -no FSTYPE "$1" 2>/dev/null | head -1; }
@@ -920,7 +991,8 @@ pick_keymap() {
 # Emit only a resolvable zone file path (or UTC). Never a directory.
 pick_timezone() {
   local zroot=/usr/share/zoneinfo region city sub args=() d path
-  [[ -d $zroot ]] || { printf 'UTC'; return 0; }
+  # Do not invent UTC when zoneinfo is missing — valid_timezone needs a TZif file.
+  [[ -d $zroot ]] || { ui_error "Missing $zroot — cannot pick a timezone"; return 1; }
   while read -r d; do
     args+=("$d" "")
   done < <(find "$zroot" -mindepth 1 -maxdepth 1 -type d \
@@ -1526,84 +1598,83 @@ else
   unset -v _wn _wf _wo
 fi
 
-# ── 4. identity ─────────────────────────────────────────────
+# ── 4. identity (validated before wipe / LUKS at step 11) ───
 ui_step 7 Identity
 if (( NONINTERACTIVE )); then
   [[ -n ${HOSTNAME:-} ]] || die "NONINTERACTIVE needs HOSTNAME in answers"
-else
-  HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-thinkpad-t14s}")" || die "aborted"
-fi
-[[ -n $HOSTNAME ]] || die "hostname cannot be empty"
-# Single label or dotted FQDN; no leading/trailing hyphen or dot.
-[[ $HOSTNAME =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]] \
-  || die "invalid hostname (DNS labels only): ${HOSTNAME}"
-
-if (( NONINTERACTIVE )); then
-  [[ -n ${TIMEZONE:-} && ( $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ) ]] \
-    || die "NONINTERACTIVE needs valid TIMEZONE in answers"
-  ok "timezone from answers: $TIMEZONE"
+  valid_hostname "$HOSTNAME" || die "invalid hostname (DNS labels only): ${HOSTNAME}"
 else
   while :; do
-    TIMEZONE="$(pick_timezone)" || die "aborted"
-    if [[ $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ]]; then
-      break
-    fi
-    ui_error "Timezone not found (need a zone file): ${TIMEZONE:-<empty>} — pick again."
+    HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-thinkpad-t14s}")" || die "aborted"
+    [[ -n $HOSTNAME ]] || { ui_warn "hostname cannot be empty"; continue; }
+    valid_hostname "$HOSTNAME" && break
+    ui_error "invalid hostname (DNS labels only; no leading/trailing hyphen)"
   done
 fi
 
 if (( NONINTERACTIVE )); then
-  [[ -n ${LOCALE:-} && $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]] \
-    || die "NONINTERACTIVE needs LOCALE in answers"
+  [[ -n ${TIMEZONE:-} ]] || die "NONINTERACTIVE needs TIMEZONE in answers"
+  valid_timezone "$TIMEZONE" || die "NONINTERACTIVE needs valid TIMEZONE in answers"
+  ok "timezone from answers: $TIMEZONE"
+else
+  while :; do
+    TIMEZONE="$(pick_timezone)" || die "aborted"
+    valid_timezone "$TIMEZONE" && break
+    ui_error "Timezone not a TZif zone file: ${TIMEZONE:-<empty>} — pick again."
+  done
+fi
+
+if (( NONINTERACTIVE )); then
+  [[ -n ${LOCALE:-} ]] || die "NONINTERACTIVE needs LOCALE in answers"
+  valid_locale "$LOCALE" || die "NONINTERACTIVE needs valid LOCALE in answers"
   ok "locale from answers: $LOCALE"
 else
-  _loc_prev=${LOCALE:-en_US.UTF-8}
-  _lu=off; _lg=off; _ld=off; _lf=off; _ls=off; _lo=off
-  case $_loc_prev in
-    en_GB.UTF-8) _lg=on ;;
-    de_DE.UTF-8) _ld=on ;;
-    fr_FR.UTF-8) _lf=on ;;
-    es_ES.UTF-8) _ls=on ;;
-    en_US.UTF-8) _lu=on ;;
-    *) _lo=on ;;
-  esac
-  LOCALE="$(ui_radio "System locale" \
-    en_US.UTF-8 "English (US)" "$_lu" \
-    en_GB.UTF-8 "English (UK)" "$_lg" \
-    de_DE.UTF-8 "German" "$_ld" \
-    fr_FR.UTF-8 "French" "$_lf" \
-    es_ES.UTF-8 "Spanish" "$_ls" \
-    other "type a locale (e.g. pt_BR.UTF-8)" "$_lo")" || die "aborted"
-  unset -v _lu _lg _ld _lf _ls _lo
-  if [[ $LOCALE == other ]]; then
-    LOCALE="$(ui_input "Locale" "$_loc_prev")" || die "aborted"
-  fi
-  unset -v _loc_prev
+  while :; do
+    _loc_prev=${LOCALE:-en_US.UTF-8}
+    _lu=off; _lg=off; _ld=off; _lf=off; _ls=off; _lo=off
+    case $_loc_prev in
+      en_GB.UTF-8) _lg=on ;;
+      de_DE.UTF-8) _ld=on ;;
+      fr_FR.UTF-8) _lf=on ;;
+      es_ES.UTF-8) _ls=on ;;
+      en_US.UTF-8) _lu=on ;;
+      *) _lo=on ;;
+    esac
+    LOCALE="$(ui_radio "System locale" \
+      en_US.UTF-8 "English (US)" "$_lu" \
+      en_GB.UTF-8 "English (UK)" "$_lg" \
+      de_DE.UTF-8 "German" "$_ld" \
+      fr_FR.UTF-8 "French" "$_lf" \
+      es_ES.UTF-8 "Spanish" "$_ls" \
+      other "type a locale (e.g. pt_BR.UTF-8)" "$_lo")" || die "aborted"
+    unset -v _lu _lg _ld _lf _ls _lo
+    if [[ $LOCALE == other ]]; then
+      LOCALE="$(ui_input "Locale" "$_loc_prev")" || die "aborted"
+    fi
+    unset -v _loc_prev
+    valid_locale "$LOCALE" && break
+    ui_error "locale not in SUPPORTED/locale.gen: ${LOCALE:-<empty>}"
+  done
 fi
-[[ $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid locale: ${LOCALE:-<empty>}"
 
 if (( NONINTERACTIVE )); then
   [[ -n ${KEYMAP:-} ]] || die "NONINTERACTIVE needs KEYMAP in answers"
+  valid_keymap "$KEYMAP" || die "NONINTERACTIVE needs valid KEYMAP in answers"
   ok "keymap from answers: $KEYMAP"
 else
-  KEYMAP="$(pick_keymap)" || die "aborted"
-fi
-[[ -n $KEYMAP ]] || die "keymap cannot be empty"
-[[ $KEYMAP =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]] \
-  || die "invalid KEYMAP name: ${KEYMAP}"
-if (( NONINTERACTIVE )) && [[ -d /usr/share/kbd/keymaps || -d /usr/share/keymaps ]]; then
-  if ! find /usr/share/kbd/keymaps /usr/share/keymaps -type f \
-       \( -name "${KEYMAP}.map" -o -name "${KEYMAP}.map.gz" \) 2>/dev/null | grep -q .; then
-    warn "KEYMAP=$KEYMAP not found under /usr/share/kbd/keymaps (continuing; vconsole may fail)"
-  fi
+  while :; do
+    KEYMAP="$(pick_keymap)" || die "aborted"
+    valid_keymap "$KEYMAP" && break
+    ui_error "keymap not available: ${KEYMAP:-<empty>} — pick again."
+  done
 fi
 if (( ! DRYRUN )) && command -v loadkeys >/dev/null 2>&1; then
   loadkeys "$KEYMAP" 2>/dev/null || warn "loadkeys $KEYMAP failed on live ISO (vconsole still set in target)"
 fi
 
 if (( NONINTERACTIVE )); then
-  [[ -n ${USERNAME:-} && $USERNAME =~ ^[a-z_][a-z0-9_-]*$ && $USERNAME != root ]] \
-    || die "NONINTERACTIVE needs valid USERNAME in answers"
+  [[ -n ${USERNAME:-} ]] || die "NONINTERACTIVE needs USERNAME in answers"
+  valid_username "$USERNAME" || die "NONINTERACTIVE needs valid USERNAME in answers"
   ok "username from answers: $USERNAME"
 else
   while :; do
@@ -1612,8 +1683,8 @@ else
       ui_warn "username cannot be empty"
     elif [[ $USERNAME == root ]]; then
       ui_warn "username cannot be 'root'"
-    elif ! [[ $USERNAME =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-      ui_error "username must match ^[a-z_][a-z0-9_-]*$ (lowercase POSIX)"
+    elif ! valid_username "$USERNAME"; then
+      ui_error "invalid username (^[a-z_][a-z0-9_-]*\$, ≤32, not an existing user/group)"
     else
       break
     fi

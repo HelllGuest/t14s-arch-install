@@ -16,6 +16,12 @@ grep -qE 'intel_iommu=on' "$ROOT/install.sh" && fail "must not set intel_iommu=o
 
 grep -q 'username cannot be empty' "$ROOT/install.sh" || fail "must reject empty username"
 grep -q "username cannot be 'root'" "$ROOT/install.sh" || fail "must reject username root"
+grep -q '^valid_username()' "$ROOT/install.sh" || fail "must define valid_username"
+grep -q '^valid_timezone()' "$ROOT/install.sh" || fail "must define valid_timezone"
+grep -q '^valid_keymap()' "$ROOT/install.sh" || fail "must define valid_keymap"
+grep -q 'grep -qxF --' "$ROOT/install.sh" || fail "keymap match must be fixed-string (-F)"
+grep -q 'getent group' "$ROOT/install.sh" || fail "username must reject existing groups"
+grep -q 'TZif' "$ROOT/install.sh" || fail "timezone must require TZif magic"
 grep -q '.t14s-install-secrets' "$ROOT/install.sh" || fail "must use secrets file (not env passwords)"
 grep -q 'USER_PASS=' "$ROOT/install.sh" && grep -q 'arch-chroot /mnt env' "$ROOT/install.sh" \
   && grep 'arch-chroot /mnt env' -A3 "$ROOT/install.sh" | grep -q 'USER_PASS=' \
@@ -206,8 +212,22 @@ grep -q "s/\\\\.map(\\\\.gz)?\\$//" "$ROOT/install.sh" \
   || fail "keymap browse must strip .map/.map.gz only (not %%.*)"
 ! grep -q 'km=\${f%%\.\*}' "$ROOT/install.sh" \
   || fail "keymap browse must not use \${f%%.*}"
-grep -q -- '-f /usr/share/zoneinfo' "$ROOT/install.sh" \
-  || fail "timezone validator must require a zone file (-f)"
+grep -qF '/usr/share/zoneinfo/$tz' "$ROOT/install.sh" \
+  || fail "timezone validator must resolve under /usr/share/zoneinfo"
+grep -qF 'valid_timezone "$TIMEZONE"' "$ROOT/install.sh" \
+  || fail "identity step must call valid_timezone"
+grep -qF 'valid_hostname "$HOSTNAME"' "$ROOT/install.sh" \
+  || fail "identity step must call valid_hostname"
+grep -qF 'valid_locale "$LOCALE"' "$ROOT/install.sh" \
+  || fail "identity step must call valid_locale"
+grep -qF 'valid_keymap "$KEYMAP"' "$ROOT/install.sh" \
+  || fail "identity step must call valid_keymap"
+grep -qF 'valid_username "$USERNAME"' "$ROOT/install.sh" \
+  || fail "identity step must call valid_username"
+grep -qF 'T14S_IDENTITY_OVERRIDES' "$ROOT/install.sh" \
+  || fail "fixture overrides must be gated on T14S_IDENTITY_OVERRIDES"
+grep -qF 'cannot pick a timezone' "$ROOT/install.sh" \
+  || fail "pick_timezone must not invent UTC when zoneinfo is missing"
 grep -q 'LUKS_WIPE' "$ROOT/install.sh" || fail "must offer optional LUKS mapper wipe"
 grep -q 'rc == 0 || rc == 1' "$ROOT/install.sh" || fail "LUKS wipe must treat dd exit 1 as success only"
 grep -q 'PACMAN_PARALLEL' "$ROOT/install.sh" || fail "must offer ParallelDownloads choice"
@@ -482,6 +502,87 @@ grep -q 'HelllGuest/t14s-arch-install/main/install.sh' "$ROOT/install.sh" \
   || fail "README must not link private dotfiles"
 grep -E 'Flatpak/Podman|Podman userns' "$ROOT/install.sh" \
   && fail "banner must not claim Podman" || true
+
+# Identity validators: real inputs (extract from install.sh; fixtures for CI)
+extract_fn() {
+  awk -v n="$1" '
+    $0 ~ "^" n "\\(\\)" {grab=1}
+    grab {print; if ($0 == "}") exit}
+  ' "$ROOT/install.sh"
+}
+# shellcheck disable=SC1090
+source <(for fn in valid_hostname valid_username valid_timezone valid_locale valid_keymap; do
+  extract_fn "$fn"
+  echo
+done)
+valid_hostname thinkpad-t14s || fail "hostname thinkpad-t14s should pass"
+valid_hostname host.example.com || fail "hostname FQDN should pass"
+valid_hostname -bad && fail "hostname -bad should fail" || true
+valid_hostname bad- && fail "hostname bad- should fail" || true
+valid_username root && fail "username root should fail" || true
+valid_username bin && fail "username bin should fail" || true
+for _g in wheel audio users; do
+  if getent group "$_g" >/dev/null 2>&1; then
+    valid_username "$_g" && fail "username $_g (group) should fail" || true
+  fi
+done
+_fresh="t14sid$$"
+valid_username "$_fresh" || fail "username $_fresh should pass"
+_long40='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+valid_username "$_long40" && fail "username len 40 should fail" || true
+valid_timezone America/New_York || fail "timezone America/New_York should pass"
+valid_timezone UTC || fail "timezone UTC should pass"
+valid_timezone '../../../etc/passwd' && fail "timezone traversal should fail" || true
+valid_timezone zone.tab && fail "timezone zone.tab should fail" || true
+valid_timezone Factory && fail "timezone Factory should fail" || true
+if [[ -f /usr/share/zoneinfo/leapseconds ]]; then
+  valid_timezone leapseconds && fail "timezone leapseconds should fail" || true
+fi
+if [[ -f /usr/share/zoneinfo/posixrules ]]; then
+  valid_timezone posixrules && fail "timezone posixrules should fail" || true
+fi
+_idtmp="$(mktemp -d)"
+trap 'rm -rf "$_idtmp"' EXIT
+printf '%s\n' 'en_US.UTF-8 UTF-8' >"$_idtmp/locales"
+mkdir -p "$_idtmp/keymaps" "$_idtmp/bin"
+: >"$_idtmp/keymaps/us.map.gz"
+: >"$_idtmp/keymaps/extra.map.gz"
+# Overrides ignored without T14S_IDENTITY_OVERRIDES=1
+LOCALE_FILES="$_idtmp/locales" valid_locale en_US.UTF-8 \
+  || fail "locale en_US.UTF-8 should pass via host locale.gen/SUPPORTED"
+LOCALE_FILES="$_idtmp/locales" valid_locale NotA_Locale \
+  && fail "locale NotA_Locale should fail without overrides inventing it" || true
+T14S_IDENTITY_OVERRIDES=1 LOCALE_FILES="$_idtmp/locales" valid_locale en_US.UTF-8 \
+  || fail "locale fixture en_US.UTF-8 should pass with overrides"
+T14S_IDENTITY_OVERRIDES=1 LOCALE_FILES="$_idtmp/locales" valid_locale NotA_Locale \
+  && fail "locale NotA_Locale should fail" || true
+T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_idtmp/keymaps" valid_keymap us \
+  || fail "keymap fixture us should pass"
+T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_idtmp/keymaps" valid_keymap '*' \
+  && fail "keymap glob * should fail" || true
+# Without overrides, KEYMAP_DIR must not redirect the search root
+KEYMAP_DIR="$_idtmp/keymaps" valid_keymap extra \
+  && fail "KEYMAP_DIR must be ignored without T14S_IDENTITY_OVERRIDES" || true
+cat >"$_idtmp/bin/localectl" <<'EOF'
+#!/bin/sh
+[ "$1" = list-keymaps ] || exit 1
+printf '%s\n' us uk dvo
+EOF
+chmod +x "$_idtmp/bin/localectl"
+extract_fn valid_keymap >"$_idtmp/valid_keymap.sh"
+# shellcheck disable=SC2016
+env T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_idtmp/keymaps" \
+  PATH="$_idtmp/bin:/usr/bin:/bin" bash -c '
+  # shellcheck source=/dev/null
+  source "$0"
+  valid_keymap us || exit 11
+  valid_keymap dvo || exit 14
+  valid_keymap extra || exit 15
+  valid_keymap u. && exit 12
+  valid_keymap "..." && exit 13
+  exit 0
+' "$_idtmp/valid_keymap.sh" \
+  || fail "stub localectl: us/dvo/extra pass / u. and ... must fail"
 
 command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning -e SC2015,SC2086,SC2162 "$ROOT/install.sh" \
   || echo "NOTE: shellcheck skipped or warnings-only"
