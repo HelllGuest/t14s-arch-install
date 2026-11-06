@@ -38,9 +38,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HelllGuest/t14s-arch-install
 ```
 
 Prefer process substitution (`bash <(curl …)`) so the UI keeps a real TTY.
-The installation runs as a full-screen `whiptail`/`dialog` TUI on `/dev/tty`;
-`dialog` is installed from the live repos if neither backend exists. Without a
-usable TTY it falls back to plain line prompts.
+The installer prefers **`dialog`** (progress box + checklist + colored
+severity boxes); falls back to `whiptail` (NEWT palettes), then plain prompts.
+Override: `T14S_UI=dialog|whiptail|plain`.
 
 ### Screens
 
@@ -57,15 +57,39 @@ usable TTY it falls back to plain line prompts.
 5. LUKS passphrase (entered twice)
 6. Hostname (default `thinkpad-t14s`), timezone, locale, keymap
 7. Username (non-empty, not `root`, lowercase POSIX) + user/root passwords
-8. Minimal GNOME? Secure Boot enroll now (if Setup Mode)?
+8. **Checklist** extras (Space toggles): GNOME, Secure Boot enroll, enable sshd
 9. Review screen with per-partition actions and sizes, then a final confirm
+
+### Message severity
+
+Colored message / confirm boxes. Theme base: dark blue screen, cyan chrome,
+yellow focus. Each severity swaps chrome for both backends:
+
+* **dialog** — per-severity `DIALOGRC` (screen/title/border/button) plus `\Z`
+  badge in the body
+* **whiptail** — per-severity `NEWT_COLORS` window palette
+
+| Severity   | When used                                      | Chrome   |
+| ---------- | ---------------------------------------------- | -------- |
+| **info**   | help, review, reuse notes, generic notices     | cyan     |
+| **warn**   | welcome banner, bad input retry, small ESP/root | yellow |
+| **error**  | invalid device/path, failed validation         | red      |
+| **critical** | wipe/ESP danger, hard gates, fatal `die`     | red+yellow |
+| **ok**     | install complete                               | green    |
+
+Box height scales with line count (`MH` floor, `H` ceiling) so REVIEW / wipe /
+complete screens are not clipped. Destructive `ui_yesno` confirms (disk erase,
+start install) use the **critical** palette. Failures show a critical box, then
+the log tail.
 
 ### Controls
 
-* Arrow keys move; **Space** toggles a radio choice; **Enter** accepts
+* Arrow keys move; **Space** toggles checklist / radio; **Enter** accepts
 * **Tab** moves to the buttons (`<Ok>`/`<Cancel>`)
 * **Esc** or selecting `<Cancel>` aborts the menu; the install aborts too if a
   required answer is cancelled
+* Every menu/radio/**checklist** includes **[log]** (scrollable install log) and
+  **[help]** (console tips). Log path: `/tmp/t14s-install.*.log`
 * In MANUAL mode, reuse lists every partition but only FAT32 passes validation
 
 **AUTO mode erases the entire disk.** The disk path must be typed in full and
@@ -73,10 +97,16 @@ the wipe confirmed again.
 
 ### Safety model
 
-Nothing is written before the final confirm. Once started, all command output
-goes to `/tmp/t14s-install.*.log`; a failure restores the screen and opens the
-log in a textbox instead of scrolling it away. Passwords are passed to the
-chroot through a `0600` file, not the environment, and shredded afterwards.
+Nothing is written before the final confirm. Once started, a full log goes to
+`/tmp/t14s-install.*.log`. Long steps (**pacstrap**, **chroot**, reflector) use
+`dialog --progressbox` when available (stdin kept as the command pipe; keys stay
+on the TTY for other widgets), otherwise stream to the console under a banner.
+A failure opens a **critical** box, then the log tail in a textbox.
+Passwords are passed to the chroot through a `0600` file, not the environment,
+and shredded afterwards.
+
+If an older installer build looks stuck on pacstrap, open another TTY
+(`Ctrl+Alt+F2`) and run: `tail -f /tmp/t14s-install.*.log`
 
 ## After first boot
 

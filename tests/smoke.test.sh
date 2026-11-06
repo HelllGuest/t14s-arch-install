@@ -57,6 +57,53 @@ grep -q 'command -v dialog' "$ROOT/install.sh" || fail "must detect/install dial
 grep -q -- '--passwordbox' "$ROOT/install.sh" || fail "passwords must use a TUI prompt"
 grep -q 'ui_yesno' "$ROOT/install.sh" || fail "choices must use ui_yesno"
 grep -q 'T14S_DRYRUN' "$ROOT/install.sh" || fail "must keep a dry-run stop point"
+grep -q 'run_progress' "$ROOT/install.sh" || fail "must define run_progress for live pacstrap output"
+grep -q 'run_progress "pacstrap' "$ROOT/install.sh" \
+  || fail "pacstrap must use run_progress (visible on TTY)"
+grep -q 'run_progress "running chroot' "$ROOT/install.sh" \
+  || fail "chroot must use run_progress"
+grep -q 'ui_view_log' "$ROOT/install.sh" || fail "must offer ui_view_log"
+grep -q 'ui_checklist' "$ROOT/install.sh" || fail "must offer ui_checklist multi-select"
+grep -q 'ui_info' "$ROOT/install.sh" || fail "must define ui_info"
+grep -q 'ui_warn' "$ROOT/install.sh" || fail "must define ui_warn"
+grep -q 'ui_error' "$ROOT/install.sh" || fail "must define ui_error"
+grep -q 'ui_critical' "$ROOT/install.sh" || fail "must define ui_critical"
+grep -q 'ui_ok' "$ROOT/install.sh" || fail "must define ui_ok"
+grep -q 'write_dialogrc' "$ROOT/install.sh" || fail "must ship dialogrc theme"
+grep -q 'DIALOG_RC_CRITICAL' "$ROOT/install.sh" || fail "must ship per-severity dialogrc"
+grep -q 'NEWT_COLORS_CRITICAL' "$ROOT/install.sh" || fail "must ship severity NEWT palettes"
+grep -q 'NEWT_COLORS_OK' "$ROOT/install.sh" || fail "must ship green OK NEWT palette"
+grep -q 'msg_height' "$ROOT/install.sh" || fail "must scale msgbox height with content"
+grep -q 'TUI_KEEP_STDIN=1' "$ROOT/install.sh" || fail "progressbox must keep pipe stdin"
+grep -q 'ui_critical' "$ROOT/install.sh" && grep -A20 '^die()' "$ROOT/install.sh" | grep -q 'ui_critical' \
+  || fail "die must show ui_critical"
+grep -q '\[severity\]' "$ROOT/install.sh" || fail "ui_yesno must document severity arg"
+grep -q '\[ERROR\]' "$ROOT/install.sh" || fail "plain yesno must label error distinctly from critical"
+grep -q 'log "View install log" off' "$ROOT/install.sh" || fail "checklist must offer log entry"
+grep -q -- '--colors' "$ROOT/install.sh" || fail "dialog must enable --colors"
+grep -q 'Message severity' "$ROOT/README.md" || fail "README must document message severity"
+grep -q 'per-severity' "$ROOT/README.md" || fail "README must note per-severity dialogrc/NEWT"
+grep -q -- '--progressbox' "$ROOT/install.sh" || fail "dialog progressbox for live steps"
+# progressbox path must not force </dev/tty on the same invocation
+python3 - "$ROOT/install.sh" <<'PY' || fail "progressbox must use TUI_KEEP_STDIN around tui"
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+i = t.find('tui --progressbox')
+assert i > 0, "progressbox call missing"
+window = t[max(0, i - 250):i + 80]
+assert "TUI_KEEP_STDIN=1" in window, "TUI_KEEP_STDIN=1 missing before progressbox"
+assert "TUI_KEEP_STDIN=0" in t[i:i + 120], "TUI_KEEP_STDIN=0 missing after progressbox"
+print("ok progressbox stdin")
+PY
+grep -q 'log "View install log"' "$ROOT/install.sh" \
+  || fail "menus must expose log viewer entry"
+grep -q 'sshd "Enable SSH' "$ROOT/install.sh" \
+  || fail "checklist must offer sshd option"
+# Prefer dialog over whiptail for progressbox
+grep -q 'Prefer dialog' "$ROOT/install.sh" \
+  || grep -A2 'command -v dialog' "$ROOT/install.sh" | grep -q 'UI=dialog' \
+  || fail "bootstrap must prefer dialog when available"
 # DRYRUN must not disable host swap / tear down /mnt before the dry-run exit
 python3 - "$ROOT/install.sh" <<'PY' || fail "umount/swapoff must be inside if (( ! DRYRUN ))"
 from pathlib import Path
