@@ -1089,7 +1089,9 @@ ui_step 2 Hardware
 _dmi="$(cat /sys/class/dmi/id/product_family /sys/class/dmi/id/product_version \
           /sys/class/dmi/id/product_name /sys/class/dmi/id/product_sku 2>/dev/null \
         | tr '\n' ' ')"
-if ! echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
+if echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
+  ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
+else
   if (( NONINTERACTIVE )); then
     warn "NONINTERACTIVE: DMI not 21CQ/21CR (${_dmi:-unknown}) — continuing"
   else
@@ -1111,7 +1113,6 @@ Continue without an AMD CPU (VM rehearsal)?" no warn \
       || die "aborted — need AuthenticAMD or explicit YES"
   fi
 fi
-ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
 
 # ── answers helpers (T14S_ANSWERS=file; export at end) ───────
 # Known keys only — never eval the answers file.

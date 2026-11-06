@@ -34,6 +34,15 @@ grep -q 'com.google.Chrome' "$ROOT/install.sh" \
 grep -q 'LOGIN_HINT' "$ROOT/install.sh" || fail "finish banner must gate on DESKTOP"
 grep -q 'AuthenticAMD' "$ROOT/install.sh" || fail "must gate on AuthenticAMD"
 grep -qF '21C[QR]' "$ROOT/install.sh" || fail "DMI check must use anchored 21C[QR]"
+awk '
+  /ok "target profile: T14s Gen 3 AMD \(21CQ\/21CR\)"/ {
+    if (prev !~ /21C\[QR\]/) { print "FAIL: ok profile not gated by DMI"; exit 1 }
+    found=1
+  }
+  { prev=$0 }
+  END { if (!found) { print "FAIL: missing ok profile"; exit 1 } }
+' "$ROOT/install.sh" \
+  || fail "ok target profile must only print on DMI match"
 grep -q 'vulkan-radeon' "$ROOT/install.sh" || fail "must pacstrap vulkan-radeon"
 grep -q 'mesa' "$ROOT/install.sh" || fail "must pacstrap mesa"
 grep -q 'thinkpad-charge-thresholds.conf' "$ROOT/install.sh" \
@@ -676,8 +685,13 @@ USER_PASS=dryrun-user-pass
 ROOT_PASS=dryrun-root-pass
 EOF
   chmod 600 "$_ans" "$_pass"
+  # Ubuntu CI: localectl list-keymaps is empty and /usr/share/kbd/keymaps is
+  # missing — use the gated fixture path (same as identity unit tests).
+  mkdir -p "$_drytmp/keymaps"
+  : >"$_drytmp/keymaps/us.map.gz"
   _dry_log="$_drytmp/dryrun.log"
   if ! T14S_DRYRUN=1 T14S_UI=plain T14S_NONINTERACTIVE=1 T14S_I_WILL_ERASE=1 \
+      T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_drytmp/keymaps" \
       T14S_ANSWERS="$_ans" T14S_PASS_FILE="$_pass" T14S_ANSWERS_OUT="$_out" \
       bash "$ROOT/install.sh" >"$_dry_log" 2>&1
   then
@@ -686,6 +700,15 @@ EOF
   fi
   grep -q '^DRYRUN:' "$_dry_log" \
     || fail "dry-run must print DRYRUN summary line"
+  # On non-T14s CI VMs: warn path must not claim ok target profile.
+  if ! grep -qiE '21C[QR]' /sys/class/dmi/id/product_name \
+        /sys/class/dmi/id/product_sku 2>/dev/null
+  then
+    grep -q 'DMI not 21CQ/21CR' "$_dry_log" \
+      || fail "non-T14s dry-run must warn about DMI mismatch"
+    grep -q 'ok target profile: T14s Gen 3 AMD' "$_dry_log" \
+      && fail "ok target profile must not print after DMI mismatch" || true
+  fi
   echo "ok NONINTERACTIVE dry-run on $_dry_disk"
 fi
 # Static: DRYRUN exit must precede every destructive write (log grep is useless:
