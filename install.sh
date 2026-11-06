@@ -298,6 +298,10 @@ write_dialogrc() {
 cleanup_ui() {
   [[ -n ${DIALOG_RC_DIR:-} && -d $DIALOG_RC_DIR ]] && rm -rf -- "$DIALOG_RC_DIR"
   [[ -f ${LOG:-}.fail ]] && rm -f -- "$LOG.fail"
+  # Drop empty dry-run / unused logs so /tmp does not accumulate zeros.
+  if [[ -n ${LOG:-} && -f $LOG && ! -s $LOG ]]; then
+    rm -f -- "$LOG"
+  fi
   return 0
 }
 
@@ -902,11 +906,12 @@ valid_keymap() {
   if [[ ${T14S_IDENTITY_OVERRIDES:-0} == 1 && -n ${KEYMAP_DIR:-} ]]; then
     root="$KEYMAP_DIR"
   fi
-  [[ -d $root ]] || return 1
   if command -v localectl >/dev/null 2>&1; then
     localectl list-keymaps 2>/dev/null | grep -qxF -- "$km" && return 0
     # Not listed: still accept an exact on-disk map (browse path). Charset is safe.
   fi
+  # Directory check only for find fallback (Ubuntu CI often has no kbd keymaps tree).
+  [[ -d $root ]] || return 1
   find "$root" -type f \
     \( -name "${km}.map" -o -name "${km}.map.gz" \
        -o -name "${km}.kmap" -o -name "${km}.kmap.gz" \) \
@@ -2219,14 +2224,22 @@ locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
 echo "KEYMAP=${KEYMAP}" > /etc/vconsole.conf
 
-# hostname / hosts (short label for .localdomain when HOSTNAME is an FQDN)
+# hostname / hosts: FQDN first, then short label (Debian/Ubuntu convention).
 echo "$HOSTNAME" > /etc/hostname
 _host_short=${HOSTNAME%%.*}
-cat > /etc/hosts <<EOF
+if [[ $_host_short == "$HOSTNAME" ]]; then
+  cat > /etc/hosts <<EOF
 127.0.0.1 localhost
 ::1       localhost
-127.0.1.1 ${_host_short}.localdomain ${HOSTNAME}
+127.0.1.1 ${HOSTNAME}.localdomain ${HOSTNAME}
 EOF
+else
+  cat > /etc/hosts <<EOF
+127.0.0.1 localhost
+::1       localhost
+127.0.1.1 ${HOSTNAME} ${_host_short}
+EOF
+fi
 unset -v _host_short
 
 # users — secrets from /root/.t14s-install-secrets (0600; shredded after chroot)

@@ -52,39 +52,49 @@ grep -qF '/usr/local/lib/thinkpad/apply-charge-thresholds.sh' "$ROOT/install.sh"
   || fail "charge apply path must be /usr/local/lib/thinkpad/ (dotfiles parity)"
 grep -q '/usr/local/lib/t14s/' "$ROOT/install.sh" \
   && fail "must not use legacy /usr/local/lib/t14s/" || true
-# set -e / ERR: functions must not end on a failing && (returns 1)
-grep -qE '^\s*return 0\s*$' "$ROOT/install.sh" \
-  || fail "helpers must explicitly return 0"
-python3 - "$ROOT/install.sh" <<'PY' || fail "say/ok/warn/ui_geometry/cleanup_ui must end with return 0"
+# set -e / ERR: top-level functions must not end on a bare failing && list.
+python3 - "$ROOT/install.sh" <<'PY' || fail "top-level function ends with failing && (set -e hazard)"
 from pathlib import Path
 import re, sys
-# Only the host-side helpers (first definitions). Chroot redefines a minimal say().
 t = Path(sys.argv[1]).read_text().splitlines()
-need = ("say", "ok", "warn", "ui_geometry", "cleanup_ui")
-found = set()
-for name in need:
-    for i, line in enumerate(t):
-        if not re.match(rf'^{name}\(\)\s*\{{', line):
-            continue
-        depth = 0
-        for j in range(i, len(t)):
-            depth += t[j].count('{') - t[j].count('}')
-            if j > i and depth <= 0:
-                body = [ln.strip() for ln in t[i:j]
-                        if ln.strip() and not ln.strip().startswith('#')]
-                if not body or body[-1] != 'return 0':
-                    raise SystemExit(
-                        f'{name}@{i+1} must end with return 0 (last={body[-1] if body else None!r})')
-                found.add(name)
+# Stop before chroot heredoc (redefines helpers under different rules).
+cut = next((i for i, ln in enumerate(t) if ln.startswith("cat > /mnt/root/chroot-setup.sh")), len(t))
+t = t[:cut]
+bad = []
+i = 0
+while i < len(t):
+    m = re.match(r'^([a-zA-Z_][a-zA-Z0-9_]*)\(\)\s*\{', t[i])
+    if not m:
+        i += 1
+        continue
+    name, depth, start = m.group(1), 0, i
+    for j in range(i, len(t)):
+        depth += t[j].count('{') - t[j].count('}')
+        if j > i and depth <= 0:
+            last = None
+            for ln in reversed(t[start:j]):
+                s = ln.strip()
+                if not s or s.startswith('#'):
+                    continue
+                last = s
                 break
-        break
-missing = set(need) - found
-if missing:
-    raise SystemExit(f'missing helpers: {sorted(missing)}')
-print('ok set -e safe helpers')
+            # Hazard: last stmt is &&-list without || / return (function status = 1).
+            if (last and '&&' in last and '||' not in last
+                    and not last.startswith('return')
+                    and not re.search(r'&&\s*return\b', last)):
+                bad.append(f'{name}:{start+1} last={last}')
+            i = j + 1
+            break
+    else:
+        i += 1
+if bad:
+    raise SystemExit('&&-tailed functions:\n  ' + '\n  '.join(bad))
+print('ok no &&-tailed top-level functions')
 PY
 grep -qF '_host_short=${HOSTNAME%%.*}' "$ROOT/install.sh" \
-  || fail "FQDN hostname must use short label for .localdomain hosts entry"
+  || fail "FQDN hostname must derive short label"
+grep -qF '127.0.1.1 ${HOSTNAME} ${_host_short}' "$ROOT/install.sh" \
+  || fail "FQDN hosts entry must list FQDN before short name"
 
 # reflector rate-sort must be concurrency + time bounded, or a few dead mirrors
 # serialize into a multi-minute blank screen
@@ -676,10 +686,32 @@ EOF
   fi
   grep -q '^DRYRUN:' "$_dry_log" \
     || fail "dry-run must print DRYRUN summary line"
-  ! grep -E 'sgdisk --zap-all|cryptsetup luksFormat|wipefs -a|mkfs\.(fat|btrfs)|dd if=/dev/' \
-    "$_dry_log" >/dev/null \
-    || fail "dry-run log must not show destructive commands"
   echo "ok NONINTERACTIVE dry-run on $_dry_disk"
 fi
+# Static: DRYRUN exit must precede every destructive write (log grep is useless:
+# those commands are not echoed, and start_log runs only after the exit).
+python3 - "$ROOT/install.sh" <<'PY' || fail "DRYRUN exit must precede destructive commands"
+from pathlib import Path
+import re, sys
+t = Path(sys.argv[1]).read_text().splitlines()
+dry = None
+for i, ln in enumerate(t):
+    if "printf 'DRYRUN:" in ln or 'printf "DRYRUN:' in ln:
+        for j in range(i, min(i + 15, len(t))):
+            if re.match(r'\s*exit 0\s*$', t[j]):
+                dry = j
+                break
+        break
+assert dry is not None, 'DRYRUN summary + exit 0 not found'
+# Match real invocations, not menu/help prose mentioning mkfs.
+pat = re.compile(
+    r'^\s*(sgdisk --zap-all|cryptsetup luksFormat|wipefs -a|mkfs\.fat|mkfs\.btrfs|dd if=/dev/)'
+)
+before = [f'{i+1}:{t[i].strip()}' for i in range(dry) if pat.search(t[i])]
+if before:
+    raise SystemExit('destructive cmds before DRYRUN exit:\n  ' + '\n  '.join(before))
+assert any(pat.search(ln) for ln in t[dry+1:]), 'no destructive cmds after DRYRUN exit'
+print('ok DRYRUN exit before destructive phase')
+PY
 
 echo "PASS: smoke.test.sh"
