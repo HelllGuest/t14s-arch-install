@@ -454,13 +454,17 @@ T14S_DRYRUN=1 bash install.sh
 T14S_UI=whiptail|dialog|plain bash install.sh
 T14S_EXTRA_PKGS='htop tmux' bash install.sh
 T14S_ANSWERS=/tmp/t14s-answers.env bash install.sh
+T14S_ANSWERS_OUT=/tmp/t14s-answers.env   # where REVIEW saves answers (default /tmp/t14s-answers.env)
 T14S_PASS_FILE=/root/t14s-pass.env   # chmod 600
 T14S_DEFAULT_HOOK_URL=https://…      # optional hook preset
+T14S_IDENTITY_OVERRIDES=1            # tests only: honor LOCALE_FILES / KEYMAP_DIR
 T14S_NONINTERACTIVE=1 T14S_I_WILL_ERASE=1 \
   T14S_ANSWERS=… T14S_PASS_FILE=… bash install.sh
 ```
 
-GitHub Actions: smoke + shellcheck on push.
+GitHub Actions: smoke + shellcheck on push. Smoke includes a
+`T14S_DRYRUN=1` NONINTERACTIVE run against a whole-disk block device
+(no writes past the DRYRUN exit).
 
 ## License
 

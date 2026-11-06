@@ -48,6 +48,43 @@ grep -q 'After=multi-user.target' "$ROOT/install.sh" \
   || fail "charge oneshot must After=multi-user.target"
 grep -q 'apply-charge-thresholds.sh' "$ROOT/install.sh" \
   || fail "must install apply-charge-thresholds.sh"
+grep -qF '/usr/local/lib/thinkpad/apply-charge-thresholds.sh' "$ROOT/install.sh" \
+  || fail "charge apply path must be /usr/local/lib/thinkpad/ (dotfiles parity)"
+grep -q '/usr/local/lib/t14s/' "$ROOT/install.sh" \
+  && fail "must not use legacy /usr/local/lib/t14s/" || true
+# set -e / ERR: functions must not end on a failing && (returns 1)
+grep -qE '^\s*return 0\s*$' "$ROOT/install.sh" \
+  || fail "helpers must explicitly return 0"
+python3 - "$ROOT/install.sh" <<'PY' || fail "say/ok/warn/ui_geometry/cleanup_ui must end with return 0"
+from pathlib import Path
+import re, sys
+# Only the host-side helpers (first definitions). Chroot redefines a minimal say().
+t = Path(sys.argv[1]).read_text().splitlines()
+need = ("say", "ok", "warn", "ui_geometry", "cleanup_ui")
+found = set()
+for name in need:
+    for i, line in enumerate(t):
+        if not re.match(rf'^{name}\(\)\s*\{{', line):
+            continue
+        depth = 0
+        for j in range(i, len(t)):
+            depth += t[j].count('{') - t[j].count('}')
+            if j > i and depth <= 0:
+                body = [ln.strip() for ln in t[i:j]
+                        if ln.strip() and not ln.strip().startswith('#')]
+                if not body or body[-1] != 'return 0':
+                    raise SystemExit(
+                        f'{name}@{i+1} must end with return 0 (last={body[-1] if body else None!r})')
+                found.add(name)
+                break
+        break
+missing = set(need) - found
+if missing:
+    raise SystemExit(f'missing helpers: {sorted(missing)}')
+print('ok set -e safe helpers')
+PY
+grep -qF '_host_short=${HOSTNAME%%.*}' "$ROOT/install.sh" \
+  || fail "FQDN hostname must use short label for .localdomain hosts entry"
 
 # reflector rate-sort must be concurrency + time bounded, or a few dead mirrors
 # serialize into a multi-minute blank screen
@@ -586,5 +623,63 @@ env T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_idtmp/keymaps" \
 
 command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning -e SC2015,SC2086,SC2162 "$ROOT/install.sh" \
   || echo "NOTE: shellcheck skipped or warnings-only"
+
+# Live NONINTERACTIVE dry-run: catches set -e helper return bugs (no disk writes).
+_dry_disk=""
+while read -r _name _typ; do
+  [[ $_typ == disk ]] || continue
+  case $_name in
+    /dev/zram*|/dev/loop*|/dev/ram*|/dev/md*) continue ;;
+  esac
+  _dry_disk=$_name
+  break
+done < <(lsblk -dpno NAME,TYPE 2>/dev/null)
+if [[ -z $_dry_disk ]]; then
+  echo "SKIP: no whole-disk block device for NONINTERACTIVE dry-run"
+else
+  _drytmp="$(mktemp -d)"
+  trap 'rm -rf "${_idtmp:-}" "$_drytmp"' EXIT
+  _ans="$_drytmp/answers.env"
+  _pass="$_drytmp/pass.env"
+  _out="$_drytmp/answers.out"
+  cat >"$_ans" <<EOF
+DISK=$_dry_disk
+MODE=auto
+ESP_MB=2048
+HOSTNAME=thinkpad-t14s
+TIMEZONE=UTC
+LOCALE=en_US.UTF-8
+KEYMAP=us
+USERNAME=t14sdry
+PRESET=minimal
+DESKTOP=N
+LUKS_WIPE=none
+PACMAN_PARALLEL=5
+BTRFS_COMPRESS=zstd3
+ZRAM_SIZE=half
+SKIP_THINKPAD_HW=Y
+SKIP_REFLECTOR=Y
+EOF
+  cat >"$_pass" <<'EOF'
+LUKS_PASS=dryrun-luks-pass
+USER_PASS=dryrun-user-pass
+ROOT_PASS=dryrun-root-pass
+EOF
+  chmod 600 "$_ans" "$_pass"
+  _dry_log="$_drytmp/dryrun.log"
+  if ! T14S_DRYRUN=1 T14S_UI=plain T14S_NONINTERACTIVE=1 T14S_I_WILL_ERASE=1 \
+      T14S_ANSWERS="$_ans" T14S_PASS_FILE="$_pass" T14S_ANSWERS_OUT="$_out" \
+      bash "$ROOT/install.sh" >"$_dry_log" 2>&1
+  then
+    tail -n 40 "$_dry_log" >&2 || true
+    fail "NONINTERACTIVE dry-run exited non-zero (disk=$_dry_disk)"
+  fi
+  grep -q '^DRYRUN:' "$_dry_log" \
+    || fail "dry-run must print DRYRUN summary line"
+  ! grep -E 'sgdisk --zap-all|cryptsetup luksFormat|wipefs -a|mkfs\.(fat|btrfs)|dd if=/dev/' \
+    "$_dry_log" >/dev/null \
+    || fail "dry-run log must not show destructive commands"
+  echo "ok NONINTERACTIVE dry-run on $_dry_disk"
+fi
 
 echo "PASS: smoke.test.sh"

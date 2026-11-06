@@ -30,17 +30,20 @@ _tty() { [[ -w /dev/tty ]] && printf '%s\n' "$*" >/dev/tty || true; }
 say()  {
   local m; m=$(printf '%s>>%s %s' "$cB" "$c0" "$*")
   printf '%s\n' "$m"
-  (( LOGGING )) && _tty "$m"
+  if (( LOGGING )); then _tty "$m"; fi
+  return 0
 }
 ok()   {
   local m; m=$(printf '%s ok%s %s' "$cG" "$c0" "$*")
   printf '%s\n' "$m"
-  (( LOGGING )) && _tty "$m"
+  if (( LOGGING )); then _tty "$m"; fi
+  return 0
 }
 warn() {
   local m; m=$(printf '%s !!%s %s' "$cY" "$c0" "$*")
   printf '%s\n' "$m" >&2
-  (( LOGGING )) && _tty "$m"
+  if (( LOGGING )); then _tty "$m"; fi
+  return 0
 }
 
 DRYRUN=${T14S_DRYRUN:-0}
@@ -94,6 +97,7 @@ ui_geometry() {
   MH=$(( H > 16 ? 14 : H )); (( MH < 10 )) && MH=10
   # Fold width for prose (~76 col modern CLI / Primer guideline).
   FW=$(( W - 4 )); (( FW > 76 )) && FW=76; (( FW < 40 )) && FW=40
+  return 0
 }
 ui_geometry
 
@@ -294,6 +298,7 @@ write_dialogrc() {
 cleanup_ui() {
   [[ -n ${DIALOG_RC_DIR:-} && -d $DIALOG_RC_DIR ]] && rm -rf -- "$DIALOG_RC_DIR"
   [[ -f ${LOG:-}.fail ]] && rm -f -- "$LOG.fail"
+  return 0
 }
 
 # dialog/whiptail draw on stdout and return the result on stderr. fd3 carries
@@ -2214,13 +2219,15 @@ locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
 echo "KEYMAP=${KEYMAP}" > /etc/vconsole.conf
 
-# hostname / hosts
+# hostname / hosts (short label for .localdomain when HOSTNAME is an FQDN)
 echo "$HOSTNAME" > /etc/hostname
+_host_short=${HOSTNAME%%.*}
 cat > /etc/hosts <<EOF
 127.0.0.1 localhost
 ::1       localhost
-127.0.1.1 ${HOSTNAME}.localdomain ${HOSTNAME}
+127.0.1.1 ${_host_short}.localdomain ${HOSTNAME}
 EOF
+unset -v _host_short
 
 # users — secrets from /root/.t14s-install-secrets (0600; shredded after chroot)
 # shellcheck disable=SC1091
@@ -2253,7 +2260,7 @@ printf '%s\n' "$_cmdline" > /etc/kernel/cmdline
 unset -v _cmdline
 
 # Charge window 70–80 — skipped on VM / SKIP_THINKPAD_HW.
-mkdir -p /etc/tmpfiles.d /usr/local/lib/t14s
+mkdir -p /etc/tmpfiles.d /usr/local/lib/thinkpad
 if ! yn_on "${SKIP_THINKPAD_HW}"; then
 cat > /etc/tmpfiles.d/thinkpad-charge-thresholds.conf <<'EOF'
 # ThinkPad charge thresholds 70–80 (PPD host; no TLP).
@@ -2261,7 +2268,7 @@ cat > /etc/tmpfiles.d/thinkpad-charge-thresholds.conf <<'EOF'
 w /sys/class/power_supply/BAT0/charge_control_start_threshold - - - - 70
 w /sys/class/power_supply/BAT0/charge_control_end_threshold - - - - 80
 EOF
-cat > /usr/local/lib/t14s/apply-charge-thresholds.sh <<'EOF'
+cat > /usr/local/lib/thinkpad/apply-charge-thresholds.sh <<'EOF'
 #!/usr/bin/env bash
 # Wait for thinkpad_acpi BAT* charge_control_*, then apply 70–80. Exit 0 if absent (VM).
 set -euo pipefail
@@ -2286,17 +2293,17 @@ done
 shopt -u nullglob
 exit 0
 EOF
-chmod 755 /usr/local/lib/t14s/apply-charge-thresholds.sh
+chmod 755 /usr/local/lib/thinkpad/apply-charge-thresholds.sh
 cat > /etc/systemd/system/thinkpad-charge-thresholds.service <<'EOF'
 [Unit]
 Description=ThinkPad battery charge thresholds (70-80)
-Documentation=file:///usr/local/lib/t14s/apply-charge-thresholds.sh
+Documentation=file:///usr/local/lib/thinkpad/apply-charge-thresholds.sh
 After=multi-user.target
 # Do not use ConditionPathExists*: BAT* may appear after early boot.
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/lib/t14s/apply-charge-thresholds.sh
+ExecStart=/usr/local/lib/thinkpad/apply-charge-thresholds.sh
 RemainAfterExit=yes
 
 [Install]
