@@ -180,17 +180,17 @@ grep -q 'NONINTERACTIVE: skipping REVIEW/confirm' "$ROOT/install.sh" \
   || fail "NONINTERACTIVE must skip REVIEW/final confirm"
 grep -q 'NONINTERACTIVE AUTO: will erase' "$ROOT/install.sh" \
   || fail "NONINTERACTIVE must skip AUTO type-DISK wipe confirm"
-grep -q 'NONINTERACTIVE needs LUKS_PASS' "$ROOT/install.sh" \
-  || fail "NONINTERACTIVE must die early without LUKS_PASS"
-# Early LUKS die must appear before ui_password for LUKS
-python3 - "$ROOT/install.sh" <<'PY' || fail "NONINTERACTIVE LUKS die must precede ui_password"
+grep -q 'NONINTERACTIVE requires T14S_PASS_FILE' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must die early without T14S_PASS_FILE"
+# Pass-file gate must appear before ui_password for LUKS
+python3 - "$ROOT/install.sh" <<'PY' || fail "NONINTERACTIVE pass-file die must precede ui_password"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
-die_i = t.find("NONINTERACTIVE needs LUKS_PASS")
+die_i = t.find("NONINTERACTIVE requires T14S_PASS_FILE")
 pw_i = t.find("ui_password 'LUKS passphrase'")
 assert die_i > 0 and pw_i > 0 and die_i < pw_i, (die_i, pw_i)
-print("ok LUKS die order")
+print("ok pass-file die order")
 PY
 grep -q 'part_on_disk' "$ROOT/install.sh" || fail "MANUAL answers must verify part_on_disk"
 grep -q 'yn_canon' "$ROOT/install.sh" || fail "must canonicalize flags to Y/N"
@@ -220,6 +220,68 @@ subprocess.check_call(["bash", "-n", name])
 print("ok chroot yn_on + bash -n")
 PY
 grep -q 'xdg-user-dirs' "$ROOT/install.sh" || fail "must pacstrap or call xdg-user-dirs"
+grep -q 'T14S_I_WILL_ERASE' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE wipe must require T14S_I_WILL_ERASE"
+grep -q 'no env passwords' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must refuse ambient env passwords"
+grep -q 'unset -v LUKS_PASS USER_PASS ROOT_PASS' "$ROOT/install.sh" \
+  || fail "must unset ambient password env at start"
+grep -q 'cannot read mode of T14S_PASS_FILE' "$ROOT/install.sh" \
+  || fail "secrets_load must fail closed if mode unknown"
+grep -q 'could not chmod 600 answers' "$ROOT/install.sh" \
+  || fail "answers_save must die if chmod 600 fails"
+grep -q 'EXTRA_PKGS_LIST' "$ROOT/install.sh" \
+  || fail "must persist EXTRA_PKGS_LIST in answers"
+grep -q "v == y || \$v == yes" "$ROOT/install.sh" \
+  || fail "yn_on must match y/yes/on/1 only"
+grep -q "HOOKS=.*sd-encrypt" "$ROOT/install.sh" \
+  || fail "HOOKS verify must match ^HOOKS=.*sd-encrypt"
+grep -q 'NONINTERACTIVE needs DISK=' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE missing DISK must die (not TUI)"
+grep -q 'NONINTERACTIVE needs MODE=' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE missing MODE must die"
+# part_on_disk must not accept nvme0n1 vs nvme0n10 via naive prefix
+python3 - "$ROOT/install.sh" <<'PY' || fail "part_on_disk must bound nvme prefix"
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+i = t.find("part_on_disk()")
+assert i > 0
+window = t[i:i+700]
+assert 'nvme0n1' in window or 'Bound' in window or '${disk}p' in window
+assert 'rest=' in window and '^[0-9]+$' in window
+print("ok part_on_disk bound")
+PY
+grep -q 'T14S_I_WILL_ERASE' "$ROOT/README.md" \
+  || fail "README must document T14S_I_WILL_ERASE"
+grep -q 'EXTRA_PKGS_LIST' "$ROOT/README.md" \
+  || fail "README must document EXTRA_PKGS_LIST"
+grep -q 'CLEAN_ESP_ARCH' "$ROOT/install.sh" || fail "must offer CLEAN_ESP_ARCH"
+grep -q 'clean_esp_arch_files' "$ROOT/install.sh" || fail "must define clean_esp_arch_files"
+grep -q 'clean_esp "' "$ROOT/install.sh" || fail "Core checklist must offer clean_esp"
+grep -q 'EFI/arch' "$ROOT/install.sh" || fail "ESP clean must remove EFI/arch vendor dir"
+grep -A25 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'CLEAN_ESP_ARCH=' \
+  || fail "arch-chroot env must pass CLEAN_ESP_ARCH"
+grep -q 'CLEAN_ESP_ARCH' "$ROOT/README.md" || fail "README must document CLEAN_ESP_ARCH"
+grep -q 'ESP / EFI layout' "$ROOT/README.md" || fail "README must document ESP/EFI layout"
+grep -q 'Securing the EFI' "$ROOT/README.md" || fail "README must document EFI securing"
+grep -q 'Can everything live under one directory' "$ROOT/README.md" \
+  || fail "README must document why EFI is not one directory"
+grep -q 'sbctl verify' "$ROOT/README.md" || fail "README must mention sbctl verify"
+# NONINTERACTIVE must keep EXTRA_PKGS_LIST replay (not wipe array empty)
+python3 - "$ROOT/install.sh" <<'PY' || fail "NONINTERACTIVE must not wipe EXTRA_PKGS after answers replay"
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+i = t.find("if (( NONINTERACTIVE )); then\n  # Keep EXTRA_PKGS")
+assert i > 0, "missing NI EXTRA_PKGS keep comment"
+window = t[i:i+120]
+assert "EXTRA_PKGS=()" not in window, "NI still wipes EXTRA_PKGS"
+print("ok EXTRA_PKGS_LIST replay")
+PY
+grep -q 'flatpak install --user' "$ROOT/README.md" \
+  || fail "README Chrome tip must match helper (--user)"
+grep -q 'Setup Mode' "$ROOT/README.md" || fail "README SB enroll must mention Setup Mode"
 grep -q 'sudo -u "\$USERNAME" tee -a' "$ROOT/install.sh" \
   || fail "starship must append zshrc as the user"
 ! grep -q "gtk-theme='Adwaita-dark'" "$ROOT/install.sh" \

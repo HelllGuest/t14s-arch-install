@@ -48,9 +48,16 @@ UI=${T14S_UI:-plain}
 NONINTERACTIVE=${T14S_NONINTERACTIVE:-0}
 ANSWERS_IN=${T14S_ANSWERS:-}
 PASS_FILE=${T14S_PASS_FILE:-}
+WILL_ERASE=${T14S_I_WILL_ERASE:-0}
+# Never accept LUKS/user/root passwords from ambient environment (/proc leak).
+# Unattended secrets come only from T14S_PASS_FILE; interactive uses ui_password.
+unset -v LUKS_PASS USER_PASS ROOT_PASS
+SECRETS_FROM_FILE=0
 APP_TITLE="T14s Arch Installer"
 PRESET=gnome
 POST_HOOK_URL=""
+EXTRA_PKGS=()
+EXTRA_PKGS_LIST=""
 LOG="$(mktemp /tmp/t14s-install.XXXXXX.log)"
 LOGGING=0
 DIALOG_RC=""
@@ -933,10 +940,12 @@ ANSWERS_KEYS=(
   INSTALL_VIRT INSTALL_AVAHI INSTALL_WIREGUARD INSTALL_TAILSCALE
   INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN
   INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST
+  CLEAN_ESP_ARCH
   UFW_SYNCTHING UFW_KDECONNECT POST_HOOK_URL
   PACMAN_PARALLEL LUKS_WIPE HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME
   MODE ESP_MB FORMAT_EFI DISK EFI_PART ROOT_PART
   BTRFS_COMPRESS ZRAM_SIZE REFLECTOR_COUNTRY SKIP_THINKPAD_HW
+  EXTRA_PKGS_LIST
 )
 
 answers_load() {
@@ -969,16 +978,26 @@ answers_save() {
       printf '%s=%s\n' "$k" "$val"
     done
   } >"$f"
-  chmod 600 "$f" 2>/dev/null || true
+  if ! chmod 600 "$f"; then
+    die "could not chmod 600 answers file: $f"
+  fi
+  _amode=$(stat -c '%a' "$f" 2>/dev/null || echo '')
+  if [[ $_amode != 600 && $_amode != 0600 ]]; then
+    die "answers file not mode 0600 after chmod (got ${_amode:-unknown}): $f"
+  fi
+  unset -v _amode
 }
 
 # Secrets file (LUKS/USER/ROOT only). Never written by answers_save.
-# Format: KEY=value lines. Must be mode 0600 (u=rw only).
+# Format: KEY=value lines. Must be mode 0600 (u=rw only). Fail closed if mode unknown.
 secrets_load() {
   local f=$1 line key val mode
   [[ -f $f ]] || return 1
-  mode=$(stat -c '%a' "$f" 2>/dev/null || stat -f '%OLp' "$f" 2>/dev/null || echo '')
-  if [[ -n $mode && $mode != 600 && $mode != 0600 ]]; then
+  mode=$(stat -c '%a' "$f" 2>/dev/null || stat -f '%OLp' "$f" 2>/dev/null || true)
+  if [[ -z $mode ]]; then
+    die "cannot read mode of T14S_PASS_FILE (need 0600): $f"
+  fi
+  if [[ $mode != 600 && $mode != 0600 ]]; then
     die "T14S_PASS_FILE must be mode 0600 (got $mode): $f"
   fi
   while IFS= read -r line || [[ -n $line ]]; do
@@ -991,9 +1010,9 @@ secrets_load() {
     key=${key%"${key##*[![:space:]]}"}
     val=${val#$'\r'}
     # Strip one matching pair of surrounding quotes (raw values preferred).
-    if [[ $val == \"*\" && $val == *\" ]]; then
+    if [[ $val == \"*\" ]]; then
       val=${val#\"}; val=${val%\"}
-    elif [[ $val == \'*\' && $val == *\' ]]; then
+    elif [[ $val == \'*\' ]]; then
       val=${val#\'}; val=${val%\'}
     fi
     case $key in
@@ -1003,7 +1022,11 @@ secrets_load() {
   return 0
 }
 
-yn_on() { [[ ${1^^} == Y* || $1 == on || $1 == 1 ]]; }
+# True for y / yes / on / 1 only (case-insensitive). Rejects "yellow", "Y*".
+yn_on() {
+  local v=${1,,}
+  [[ $v == y || $v == yes || $v == on || $v == 1 ]]
+}
 def_onoff() { yn_on "$1" && printf on || printf off; }
 # Canonicalize flag to Y or N (keeps chroot gates + answers consistent).
 yn_canon() {
@@ -1011,16 +1034,22 @@ yn_canon() {
   if yn_on "${_yc:-}"; then _yc=Y; else _yc=N; fi
 }
 
-# True if partition $1 is a child of disk $2 (PKNAME / path prefix).
+# True if partition $1 is a child of disk $2 (PKNAME preferred; bounded path fallback).
 part_on_disk() {
-  local part=$1 disk=$2 pk base
+  local part=$1 disk=$2 pk base rest
   [[ -b $part && -b $disk ]] || return 1
   pk=$(lsblk -no PKNAME "$part" 2>/dev/null | head -1)
   base=${disk##*/}
   [[ -n $pk && $pk == "$base" ]] && return 0
-  # Fallback: partition path starts with disk path (e.g. /dev/sda1 under /dev/sda).
-  [[ $part == "$disk"* && $part != "$disk" ]] && return 0
-  return 1
+  # Bound fallback so /dev/nvme0n1 does not match /dev/nvme0n10p1.
+  if [[ $disk == *nvme* || $disk == *mmcblk* || $disk == *loop* ]]; then
+    [[ $part == "${disk}p"* ]] || return 1
+    rest=${part#"${disk}p"}
+  else
+    [[ $part == "$disk"* && $part != "$disk" ]] || return 1
+    rest=${part#"$disk"}
+  fi
+  [[ $rest =~ ^[0-9]+$ ]]
 }
 
 if [[ -n $ANSWERS_IN ]]; then
@@ -1032,10 +1061,17 @@ if [[ -n $ANSWERS_IN ]]; then
 fi
 if [[ -n $PASS_FILE ]]; then
   if secrets_load "$PASS_FILE"; then
+    SECRETS_FROM_FILE=1
     ok "loaded secrets from $PASS_FILE (passwords not saved to answers)"
   else
     die "T14S_PASS_FILE not readable: $PASS_FILE"
   fi
+fi
+if (( NONINTERACTIVE )); then
+  [[ -n $PASS_FILE && $SECRETS_FROM_FILE == 1 ]] \
+    || die "NONINTERACTIVE requires T14S_PASS_FILE (mode 0600; no env passwords)"
+  [[ -n ${LUKS_PASS:-} && -n ${USER_PASS:-} && -n ${ROOT_PASS:-} ]] \
+    || die "T14S_PASS_FILE must set LUKS_PASS, USER_PASS, and ROOT_PASS"
 fi
 
 # ── profile preset (feeds checklist defaults) ───────────────
@@ -1058,21 +1094,21 @@ case $PRESET in
     DESKTOP=${DESKTOP:-N}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-N}
     INSTALL_CLI=${INSTALL_CLI:-N}; INSTALL_PODMAN=${INSTALL_PODMAN:-N}
     INSTALL_STARSHIP=${INSTALL_STARSHIP:-N}; INSTALL_AVAHI=${INSTALL_AVAHI:-N}
-    INSTALL_TLP=${INSTALL_TLP:-Y}
+    INSTALL_TLP=${INSTALL_TLP:-Y}; INSTALL_SELFTEST=${INSTALL_SELFTEST:-N}
     ;;
   dev)
     DESKTOP=${DESKTOP:-Y}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-Y}
     INSTALL_CLI=${INSTALL_CLI:-Y}; INSTALL_PODMAN=${INSTALL_PODMAN:-Y}
     INSTALL_STARSHIP=${INSTALL_STARSHIP:-Y}; INSTALL_AVAHI=${INSTALL_AVAHI:-Y}
     INSTALL_CHROME_HINT=${INSTALL_CHROME_HINT:-Y}
-    INSTALL_TLP=${INSTALL_TLP:-N}
+    INSTALL_TLP=${INSTALL_TLP:-N}; INSTALL_SELFTEST=${INSTALL_SELFTEST:-Y}
     ;;
   *)
     PRESET=gnome
     DESKTOP=${DESKTOP:-Y}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-Y}
     INSTALL_CLI=${INSTALL_CLI:-N}; INSTALL_PODMAN=${INSTALL_PODMAN:-N}
     INSTALL_STARSHIP=${INSTALL_STARSHIP:-N}; INSTALL_AVAHI=${INSTALL_AVAHI:-Y}
-    INSTALL_TLP=${INSTALL_TLP:-N}
+    INSTALL_TLP=${INSTALL_TLP:-N}; INSTALL_SELFTEST=${INSTALL_SELFTEST:-Y}
     ;;
 esac
 # Fill remaining flags with N if unset
@@ -1081,10 +1117,42 @@ esac
 : "${INSTALL_TAILSCALE:=N}" "${INSTALL_CHROME_HINT:=N}" "${INSTALL_FAIL2BAN:=N}"
 : "${INSTALL_THINKFAN:=N}" "${UFW_SYNCTHING:=N}" "${UFW_KDECONNECT:=N}"
 : "${INSTALL_SNAPPER_HOME:=N}" "${INSTALL_LINUX_STABLE:=N}" "${INSTALL_PLYMOUTH:=N}"
-: "${INSTALL_SELFTEST:=Y}"
+: "${INSTALL_SELFTEST:=N}" "${CLEAN_ESP_ARCH:=Y}"
 : "${PACMAN_PARALLEL:=10}" "${LUKS_WIPE:=none}"
 : "${BTRFS_COMPRESS:=zstd3}" "${ZRAM_SIZE:=half}" "${REFLECTOR_COUNTRY:=}"
 : "${FORMAT_EFI:=1}"
+
+# Remove prior Arch boot files under an ESP mount root ($1 = /mnt/boot or /boot).
+# Always drops kernels/ucode that conflict with pacstrap. When CLEAN_ESP_ARCH=Y
+# also removes Arch UKIs, Arch loader entries, and EFI/arch vendor dirs.
+# Never touches Windows / other-OS vendor directories.
+clean_esp_arch_files() {
+  local root=${1%/}
+  [[ -d $root ]] || return 0
+  rm -f "$root"/intel-ucode.img "$root"/amd-ucode.img \
+        "$root"/vmlinuz-linux* "$root"/initramfs-linux* 2>/dev/null || true
+  if yn_on "${CLEAN_ESP_ARCH:-Y}"; then
+    rm -f "$root"/EFI/Linux/arch-linux*.efi \
+          "$root"/EFI/Linux/arch*.efi 2>/dev/null || true
+    if [[ -d $root/loader/entries ]]; then
+      find "$root/loader/entries" -maxdepth 1 -type f \
+        \( -name 'arch*.conf' -o -name 'linux-*.conf' \) -delete 2>/dev/null || true
+    fi
+    # Legacy GRUB/refind-style Arch vendor dirs (case variants).
+    rm -rf "$root"/EFI/arch "$root"/EFI/Arch "$root"/EFI/ARCH 2>/dev/null || true
+  fi
+}
+# Replay checklist extras from answers (space-separated package names).
+if [[ -n ${EXTRA_PKGS_LIST:-} ]]; then
+  for _p in $EXTRA_PKGS_LIST; do
+    if [[ $_p =~ ^[a-z0-9][a-z0-9@._+-]*$ ]]; then
+      EXTRA_PKGS+=("$_p")
+    else
+      warn "Ignoring invalid EXTRA_PKGS_LIST entry: $_p"
+    fi
+  done
+  unset -v _p
+fi
 
 # VM / non-ThinkPad rehearsal: skip BAT thresholds, fprintd, thinkfan notes.
 IS_VM=0
@@ -1103,7 +1171,9 @@ if yn_on "$SKIP_THINKPAD_HW"; then
 fi
 
 # ── 1. choose disk ──────────────────────────────────────────
-if (( NONINTERACTIVE )) && [[ -n ${DISK:-} && -b ${DISK:-} && $(disk_type "$DISK") == disk ]]; then
+if (( NONINTERACTIVE )); then
+  [[ -n ${DISK:-} && -b ${DISK:-} && $(disk_type "$DISK") == disk ]] \
+    || die "NONINTERACTIVE needs DISK=<whole-disk block device> in answers"
   ok "using DISK from answers: $DISK"
 else
   while :; do
@@ -1141,7 +1211,10 @@ else
 fi
 
 # ── 2. partition strategy ───────────────────────────────────
-if (( ! NONINTERACTIVE )) || [[ -z ${MODE:-} ]]; then
+if (( NONINTERACTIVE )); then
+  [[ ${MODE:-} == auto || ${MODE:-} == manual ]] \
+    || die "NONINTERACTIVE needs MODE=auto|manual in answers"
+else
   _mode_auto=on; _mode_man=off
   [[ ${MODE:-auto} == manual ]] && { _mode_auto=off; _mode_man=on; }
   MODE="$(ui_radio "How should $DISK be partitioned?" \
@@ -1151,11 +1224,17 @@ if (( ! NONINTERACTIVE )) || [[ -z ${MODE:-} ]]; then
   unset -v _mode_auto _mode_man
 fi
 
+require_ni_erase() {
+  [[ ${WILL_ERASE} == 1 ]] \
+    || die "NONINTERACTIVE destructive install needs T14S_I_WILL_ERASE=1"
+}
+
 if [[ $MODE == auto ]]; then
   FORMAT_EFI=1
   while :; do
-    if (( NONINTERACTIVE )) && [[ -n ${ESP_MB:-} ]]; then
-      :
+    if (( NONINTERACTIVE )); then
+      [[ ${ESP_MB:-} =~ ^(1024|2048|4096)$ ]] \
+        || die "NONINTERACTIVE AUTO needs ESP_MB=1024|2048|4096 in answers"
     else
       _e2=off; _e1=off; _e4=off
       case ${ESP_MB:-2048} in
@@ -1180,6 +1259,7 @@ Pick a smaller ESP."
   done
 
   if (( NONINTERACTIVE )); then
+    require_ni_erase
     warn "NONINTERACTIVE AUTO: will erase entire $DISK (ESP ${ESP_MB}MB + LUKS root)"
   else
     ui_critical "AUTO mode ERASES the ENTIRE disk:
@@ -1200,9 +1280,10 @@ $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
   ROOT_PART="$(part_of "$DISK" 2)"
 else
   # MANUAL: honor EFI_PART/ROOT_PART/FORMAT_EFI from answers under NONINTERACTIVE.
-  if (( NONINTERACTIVE )) \
-    && [[ -n ${EFI_PART:-} && -n ${ROOT_PART:-} ]] \
-    && [[ -b $EFI_PART && -b $ROOT_PART ]]; then
+  if (( NONINTERACTIVE )); then
+    [[ -n ${EFI_PART:-} && -n ${ROOT_PART:-} && -b ${EFI_PART:-/dev/null} && -b ${ROOT_PART:-/dev/null} ]] \
+      || die "NONINTERACTIVE MANUAL needs EFI_PART and ROOT_PART block devices in answers"
+    require_ni_erase
     [[ $EFI_PART != "$ROOT_PART" ]] || die "EFI_PART and ROOT_PART must differ"
     part_on_disk "$EFI_PART" "$DISK" \
       || die "EFI_PART $EFI_PART is not on DISK $DISK"
@@ -1303,10 +1384,7 @@ fi
 ok "EFI=$EFI_PART  ROOT=$ROOT_PART  (format_efi=$FORMAT_EFI)"
 
 # ── 3. luks passphrase + optional mapper wipe (archfi-style) ─
-if (( NONINTERACTIVE )) && [[ -z ${LUKS_PASS:-} ]]; then
-  die "NONINTERACTIVE needs LUKS_PASS in T14S_PASS_FILE"
-fi
-if [[ -n ${LUKS_PASS:-} ]]; then
+if (( SECRETS_FROM_FILE )); then
   ok "LUKS passphrase from T14S_PASS_FILE"
 else
   while :; do
@@ -1316,8 +1394,10 @@ else
     ui_warn "Empty or mismatched LUKS passphrase — retry."
   done
 fi
-if (( NONINTERACTIVE )) && [[ ${LUKS_WIPE:-} =~ ^(none|fast|normal)$ ]]; then
-  :
+if (( NONINTERACTIVE )); then
+  [[ ${LUKS_WIPE:-none} =~ ^(none|fast|normal)$ ]] \
+    || die "NONINTERACTIVE needs LUKS_WIPE=none|fast|normal in answers"
+  LUKS_WIPE=${LUKS_WIPE:-none}
 else
   _wn=off; _wf=off; _wo=off
   case ${LUKS_WIPE:-none} in
@@ -1333,14 +1413,16 @@ else
 fi
 
 # ── 4. identity ─────────────────────────────────────────────
-if (( NONINTERACTIVE )) && [[ -n ${HOSTNAME:-} ]]; then
-  :
+if (( NONINTERACTIVE )); then
+  [[ -n ${HOSTNAME:-} ]] || die "NONINTERACTIVE needs HOSTNAME in answers"
 else
   HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-thinkpad-t14s}")" || die "aborted"
 fi
 [[ -n $HOSTNAME ]] || die "hostname cannot be empty"
 
-if (( NONINTERACTIVE )) && [[ -n ${TIMEZONE:-} && ( $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ) ]]; then
+if (( NONINTERACTIVE )); then
+  [[ -n ${TIMEZONE:-} && ( $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ) ]] \
+    || die "NONINTERACTIVE needs valid TIMEZONE in answers"
   ok "timezone from answers: $TIMEZONE"
 else
   while :; do
@@ -1352,7 +1434,9 @@ else
   done
 fi
 
-if (( NONINTERACTIVE )) && [[ -n ${LOCALE:-} && $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+if (( NONINTERACTIVE )); then
+  [[ -n ${LOCALE:-} && $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]] \
+    || die "NONINTERACTIVE needs LOCALE in answers"
   ok "locale from answers: $LOCALE"
 else
   _loc_prev=${LOCALE:-en_US.UTF-8}
@@ -1380,7 +1464,8 @@ else
 fi
 [[ $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid locale: ${LOCALE:-<empty>}"
 
-if (( NONINTERACTIVE )) && [[ -n ${KEYMAP:-} ]]; then
+if (( NONINTERACTIVE )); then
+  [[ -n ${KEYMAP:-} ]] || die "NONINTERACTIVE needs KEYMAP in answers"
   ok "keymap from answers: $KEYMAP"
 else
   KEYMAP="$(pick_keymap)" || die "aborted"
@@ -1390,7 +1475,9 @@ if (( ! DRYRUN )) && command -v loadkeys >/dev/null 2>&1; then
   loadkeys "$KEYMAP" 2>/dev/null || warn "loadkeys $KEYMAP failed on live ISO (vconsole still set in target)"
 fi
 
-if (( NONINTERACTIVE )) && [[ -n ${USERNAME:-} && $USERNAME =~ ^[a-z_][a-z0-9_-]*$ && $USERNAME != root ]]; then
+if (( NONINTERACTIVE )); then
+  [[ -n ${USERNAME:-} && $USERNAME =~ ^[a-z_][a-z0-9_-]*$ && $USERNAME != root ]] \
+    || die "NONINTERACTIVE needs valid USERNAME in answers"
   ok "username from answers: $USERNAME"
 else
   while :; do
@@ -1406,11 +1493,8 @@ else
     fi
   done
 fi
-if (( NONINTERACTIVE )) && [[ -z ${USER_PASS:-} || -z ${ROOT_PASS:-} ]]; then
-  die "NONINTERACTIVE needs USER_PASS and ROOT_PASS in T14S_PASS_FILE"
-fi
-if [[ -n ${USER_PASS:-} ]]; then
-  ok "user password from T14S_PASS_FILE"
+if (( SECRETS_FROM_FILE )); then
+  ok "user/root passwords from T14S_PASS_FILE"
 else
   while :; do
     USER_PASS="$(ui_password "Password for $USERNAME")" || die "aborted"
@@ -1418,10 +1502,6 @@ else
     [[ -n $USER_PASS && $USER_PASS == "$USER_PASS2" ]] && break
     ui_warn "Empty or mismatched password — retry."
   done
-fi
-if [[ -n ${ROOT_PASS:-} ]]; then
-  ok "root password from T14S_PASS_FILE"
-else
   while :; do
     ROOT_PASS="$(ui_password 'Root password')" || die "aborted"
     ROOT_PASS2="$(ui_password 'Repeat root password')" || die "aborted"
@@ -1431,7 +1511,14 @@ else
 fi
 unset -v LUKS_PASS2 USER_PASS2 ROOT_PASS2
 
-if (( ! NONINTERACTIVE )); then
+if (( NONINTERACTIVE )); then
+  [[ $PACMAN_PARALLEL =~ ^(5|10|15)$ ]] \
+    || die "NONINTERACTIVE needs PACMAN_PARALLEL=5|10|15"
+  [[ $BTRFS_COMPRESS =~ ^(zstd1|zstd3|zstd15|none)$ ]] \
+    || die "NONINTERACTIVE needs BTRFS_COMPRESS=zstd1|zstd3|zstd15|none"
+  [[ $ZRAM_SIZE =~ ^(half|quarter|8192)$ ]] \
+    || die "NONINTERACTIVE needs ZRAM_SIZE=half|quarter|8192"
+else
   _p5=off; _p10=on; _p15=off
   case $PACMAN_PARALLEL in 5) _p5=on; _p10=off ;; 15) _p15=on; _p10=off ;; esac
   PACMAN_PARALLEL="$(ui_radio "pacman ParallelDownloads (live + target)" \
@@ -1477,7 +1564,8 @@ flag_from_opts() {
 }
 
 if (( NONINTERACTIVE )); then
-  EXTRA_PKGS=()
+  # Keep EXTRA_PKGS already filled from EXTRA_PKGS_LIST (answers replay).
+  :
 else
   OPTS_CORE="$(ui_checklist "Core extras — Space toggles, Enter confirms" \
     gnome "Minimal GNOME desktop + Flatpak browsers/VPN" "$(def_onoff "$DESKTOP")" \
@@ -1492,6 +1580,7 @@ else
     linux_stable "Also install linux (stable) UKI" "$(def_onoff "$INSTALL_LINUX_STABLE")" \
     plymouth "Plymouth splash (optional)" "$(def_onoff "$INSTALL_PLYMOUTH")" \
     selftest "Write post-boot BT/audio self-test script" "$(def_onoff "$INSTALL_SELFTEST")" \
+    clean_esp "Clean old Arch files from ESP (UKIs/entries/EFI/arch)" "$(def_onoff "$CLEAN_ESP_ARCH")" \
     chrome_hint "Write post-boot Chrome Flatpak helper script" "$(def_onoff "$INSTALL_CHROME_HINT")")" \
     || die "aborted"
 
@@ -1527,7 +1616,8 @@ else
   DESKTOP=N; INSTALL_NERD_FONTS=N; ENROLL_SB=N; ENABLE_SSHD=N
   INSTALL_CUPS=N; SKIP_REFLECTOR=N; INSTALL_TLP=N; INSTALL_THINKFAN=N
   INSTALL_SNAPPER_HOME=N; INSTALL_LINUX_STABLE=N; INSTALL_PLYMOUTH=N
-  INSTALL_SELFTEST=N; INSTALL_CHROME_HINT=N; INSTALL_CLI=N; INSTALL_STARSHIP=N
+  INSTALL_SELFTEST=N; CLEAN_ESP_ARCH=N; INSTALL_CHROME_HINT=N
+  INSTALL_CLI=N; INSTALL_STARSHIP=N
   INSTALL_PODMAN=N; INSTALL_DOCKER=N; INSTALL_VIRT=N
   INSTALL_AVAHI=N; INSTALL_WIREGUARD=N; INSTALL_TAILSCALE=N
   INSTALL_FAIL2BAN=N; UFW_SYNCTHING=N; UFW_KDECONNECT=N
@@ -1545,6 +1635,7 @@ else
   flag_from_opts "$OPTS_CORE" linux_stable && INSTALL_LINUX_STABLE=Y || true
   flag_from_opts "$OPTS_CORE" plymouth && INSTALL_PLYMOUTH=Y || true
   flag_from_opts "$OPTS_CORE" selftest && INSTALL_SELFTEST=Y || true
+  flag_from_opts "$OPTS_CORE" clean_esp && CLEAN_ESP_ARCH=Y || true
   flag_from_opts "$OPTS_CORE" chrome_hint && INSTALL_CHROME_HINT=Y || true
 
   flag_from_opts "$OPTS_TOOLS" cli && INSTALL_CLI=Y || true
@@ -1619,6 +1710,12 @@ fi
 if yn_on "$SKIP_THINKPAD_HW"; then
   INSTALL_THINKFAN=N
 fi
+# Fresh-format ESP already empty; keep CLEAN_ESP_ARCH=Y for answers consistency.
+if [[ ${FORMAT_EFI:-1} == 1 ]]; then
+  CLEAN_ESP_ARCH=Y
+elif ! yn_on "${CLEAN_ESP_ARCH:-Y}"; then
+  warn "CLEAN_ESP_ARCH=N — keeping prior Arch UKIs/entries; kernels/ucode still removed to avoid pacstrap conflicts"
+fi
 # Reflector country sanitize (letters/comma/space only).
 if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
   _rc_re='^[A-Za-z][A-Za-z ,]*$'
@@ -1629,7 +1726,7 @@ if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
   unset -v _rc_re
 fi
 
-# Optional free-form extras (archfi -cpl spirit). Env T14S_EXTRA_PKGS pre-fills.
+# Optional free-form extras (archfi -cpl spirit). Env T14S_EXTRA_PKGS appends.
 if (( ! NONINTERACTIVE )); then
   _extra_in="$(ui_input "More pacstrap packages (space-separated, empty=none)" \
     "${T14S_EXTRA_PKGS:-}")" || die "aborted"
@@ -1647,6 +1744,8 @@ if [[ -n ${_extra_in// /} ]]; then
   done
 fi
 unset -v _extra_in _p
+# Persist extras for answers replay (space-separated).
+EXTRA_PKGS_LIST="${EXTRA_PKGS[*]:-}"
 
 # Canonicalize boolean flags (answers may use on/1; chroot + saves want Y/N).
 for _flag in DESKTOP INSTALL_NERD_FONTS ENROLL_SB ENABLE_SSHD INSTALL_CUPS \
@@ -1654,6 +1753,7 @@ for _flag in DESKTOP INSTALL_NERD_FONTS ENROLL_SB ENABLE_SSHD INSTALL_CUPS \
   INSTALL_VIRT INSTALL_AVAHI INSTALL_WIREGUARD INSTALL_TAILSCALE \
   INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN \
   INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST \
+  CLEAN_ESP_ARCH \
   UFW_SYNCTHING UFW_KDECONNECT SKIP_THINKPAD_HW
 do
   [[ -v $_flag ]] || printf -v "$_flag" '%s' N
@@ -1666,6 +1766,7 @@ _REVIEW="REVIEW — nothing has been written yet.
 
   Disk          $DISK $(size_mb "$DISK")MB ($([[ $MODE == auto ]] && echo "AUTO wipe, ${ESP_MB}MB ESP" || echo manual))
   EFI           $EFI_PART $(size_mb "$EFI_PART")MB ($([[ $FORMAT_EFI == 1 ]] && echo format || echo reuse))
+  Clean ESP     $CLEAN_ESP_ARCH (old Arch UKIs/entries/EFI/arch)
   ROOT          $ROOT_PART $(size_mb "$ROOT_PART")MB (LUKS2, wipe=${LUKS_WIPE})
   Hostname      $HOSTNAME
   Timezone      $TIMEZONE
@@ -1790,17 +1891,10 @@ udevadm settle 2>/dev/null || true
 mount -t vfat "$EFI_PART" /mnt/boot                # explicit type: don't rely on auto-detect
 esp_mb=$(df -Pm /mnt/boot | awk 'NR==2{print $2}'); esp_mb=${esp_mb:-0}
 (( esp_mb >= 1024 )) || warn "ESP is ${esp_mb}MB — dual-kernel UKIs want >=1024MB; install may fill it"
-# defensive: drop leftover Arch boot files from a prior install so pacstrap won't hit
-# 'conflicting files'. Clears both ucode names for multiboot ESP hygiene (this
-# installer only pacstraps amd-ucode; intel-ucode.img removal is intentional).
-step "cleaning prior Arch boot artifacts on ESP"
-rm -f /mnt/boot/intel-ucode.img /mnt/boot/amd-ucode.img \
-      /mnt/boot/vmlinuz-linux* /mnt/boot/initramfs-linux* \
-      /mnt/boot/EFI/Linux/arch-linux*.efi 2>/dev/null || true
-if [[ -d /mnt/boot/loader/entries ]]; then
-  find /mnt/boot/loader/entries -maxdepth 1 -type f \
-    \( -name 'arch*.conf' -o -name 'linux-*.conf' \) -delete 2>/dev/null || true
-fi
+# Drop leftover Arch boot files from a prior install (see CLEAN_ESP_ARCH).
+# Always clears kernels/ucode so pacstrap won't hit 'conflicting files'.
+step "cleaning prior Arch boot artifacts on ESP (CLEAN_ESP_ARCH=$CLEAN_ESP_ARCH)"
+clean_esp_arch_files /mnt/boot
 ok "filesystems mounted (ESP ${esp_mb}MB)"
 
 # ── 6. base install ─────────────────────────────────────────
@@ -1892,7 +1986,7 @@ cat > /mnt/root/chroot-setup.sh <<'CHROOT'
 #!/usr/bin/env bash
 set -euo pipefail
 say(){ printf '\e[1;34m>>\e[0m %s\n' "$*"; }
-yn_on() { [[ ${1^^} == Y* || $1 == on || $1 == 1 ]]; }
+yn_on() { local v=${1,,}; [[ $v == y || $v == yes || $v == on || $v == 1 ]]; }
 
 # time / locale / keymap
 if [[ $TIMEZONE == UTC ]]; then
@@ -1935,7 +2029,7 @@ if yn_on "${INSTALL_PLYMOUTH}"; then
 fi
 sed -i "s/^HOOKS=.*/${_HOOKS}/" /etc/mkinitcpio.conf
 unset -v _HOOKS
-grep -q 'sd-encrypt' /etc/mkinitcpio.conf \
+grep -Eq '^HOOKS=.*sd-encrypt' /etc/mkinitcpio.conf \
   || { echo "ERROR: mkinitcpio HOOKS missing sd-encrypt after sed" >&2; exit 1; }
 
 # kernel cmdline (shared by UKIs)
@@ -2005,14 +2099,21 @@ else
 fi
 
 # UKI presets: linux-lts (primary) + linux-hardened (fallback)
-# reuse ESP: clear stale UKIs + loader entries before rebuild (multiboot-safe names)
-if [[ ${FORMAT_EFI:-1} == 0 ]]; then
-  say "reuse ESP — removing old Arch UKIs and loader entries"
-  rm -f /boot/EFI/Linux/arch-linux*.efi 2>/dev/null || true
+# Re-clean Arch EFI artifacts before rebuild (host already cleaned /mnt/boot).
+if yn_on "${CLEAN_ESP_ARCH}"; then
+  say "CLEAN_ESP_ARCH — removing old Arch UKIs / loader entries / EFI/arch"
+fi
+# Always strip leftover non-UKI kernels/ucode; full clean when CLEAN_ESP_ARCH=Y.
+# (Function inlined — chroot has no host helpers.)
+rm -f /boot/intel-ucode.img /boot/amd-ucode.img \
+      /boot/vmlinuz-linux* /boot/initramfs-linux* 2>/dev/null || true
+if yn_on "${CLEAN_ESP_ARCH}"; then
+  rm -f /boot/EFI/Linux/arch-linux*.efi /boot/EFI/Linux/arch*.efi 2>/dev/null || true
   if [[ -d /boot/loader/entries ]]; then
     find /boot/loader/entries -maxdepth 1 -type f \
       \( -name 'arch*.conf' -o -name 'linux-*.conf' \) -delete 2>/dev/null || true
   fi
+  rm -rf /boot/EFI/arch /boot/EFI/Arch /boot/EFI/ARCH 2>/dev/null || true
 fi
 mkdir -p /boot/EFI/Linux
 cat > /etc/mkinitcpio.d/linux-lts.preset <<EOF
@@ -2564,7 +2665,7 @@ if ! run_progress "running chroot config (UKIs, users, optional GNOME)" \
     INSTALL_FAIL2BAN="$INSTALL_FAIL2BAN" INSTALL_CHROME_HINT="$INSTALL_CHROME_HINT" \
     INSTALL_SNAPPER_HOME="$INSTALL_SNAPPER_HOME" \
     INSTALL_LINUX_STABLE="$INSTALL_LINUX_STABLE" INSTALL_PLYMOUTH="$INSTALL_PLYMOUTH" \
-    INSTALL_SELFTEST="$INSTALL_SELFTEST" \
+    INSTALL_SELFTEST="$INSTALL_SELFTEST" CLEAN_ESP_ARCH="$CLEAN_ESP_ARCH" \
     ZRAM_SIZE="$ZRAM_SIZE" REFLECTOR_COUNTRY="$REFLECTOR_COUNTRY" \
     SKIP_THINKPAD_HW="$SKIP_THINKPAD_HW" \
     UFW_SYNCTHING="$UFW_SYNCTHING" UFW_KDECONNECT="$UFW_KDECONNECT" \

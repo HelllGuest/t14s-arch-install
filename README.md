@@ -83,6 +83,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
 | Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
 | Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW check |
+| Clean ESP Arch | Remove old Arch UKIs, `arch*`/`linux-*` loader entries, `EFI/arch` | Reinstall / multiboot hygiene (default on). Kernels/ucode always cleared. Never touches Windows/other OS dirs |
 | Chrome helper | `~/install-chrome-flatpak.sh` | Chrome needs post-boot Flatpak userns |
 
 ### Dev / CLI checklist
@@ -122,7 +123,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Target pacman / reflector.conf | ParallelDownloads; weekly reflector | Same mirror story post-boot |
 | Target UFW | deny in / allow out; enabled | Firewall on first boot |
 | Target sudoers | `%wheel` enabled | User admin |
-| ESP | Format or reuse; stale Arch UKIs cleaned on reuse | Multiboot-safe |
+| ESP | Format or reuse; optional Arch cleanup (`CLEAN_ESP_ARCH`) | Multiboot-safe; frees UKI space |
 | Answers files | `/tmp/t14s-answers.env` + `/root/t14s-answers.env` mode `0600` | Replay installs |
 
 ---
@@ -135,7 +136,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Optional LUKS mapper `dd` wipe | Paranoia before `mkfs.btrfs` |
 | AUTO: entire disk GPT rewrite | Single-disk dedicated install |
 | Non-UKI `initramfs-*.img` after UKI build | Free ESP space |
-| Stale `arch-linux*.efi` / old loader entries on ESP reuse | Avoid dual-boot clutter |
+| Stale Arch UKIs / `loader/entries` / `EFI/arch` (when `CLEAN_ESP_ARCH=Y`) | Avoid dual Arch boots; free ESP |
 | `/root/.t14s-install-secrets` + chroot script shredded | Passwords not left on disk |
 | Chrome Flatpak **not** installed in chroot | bwrap userns fails in chroot |
 
@@ -182,17 +183,31 @@ UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whipt
 
 ### Unattended
 
+**Destructive.** Missing or invalid answers never open a TUI — the script
+`die`s. Ambient `LUKS_PASS` / `USER_PASS` / `ROOT_PASS` env is ignored
+(prevents `/proc` leaks); secrets come only from `T14S_PASS_FILE`.
+
 ```bash
 T14S_NONINTERACTIVE=1 \
+T14S_I_WILL_ERASE=1 \                   # required for AUTO or MANUAL wipe
 T14S_ANSWERS=/path/to/t14s-answers.env \
-T14S_PASS_FILE=/path/to/secrets.env \   # mode 0600; LUKS_PASS USER_PASS ROOT_PASS
+T14S_PASS_FILE=/path/to/secrets.env \   # must be mode 0600
 T14S_POST_HOOK_I_UNDERSTAND=1 \         # only if POST_HOOK_URL set
 bash install.sh
 ```
 
-Skips: DMI/AMD confirms, AUTO type-DISK wipe confirm, REVIEW UI, final start
-confirm (plan still logged). MANUAL parts must sit on `DISK`; ESP ≥512 MB,
-ROOT ≥8 GB. Flags (`Y`/`N`/`on`/`1`) become `Y`/`N` before chroot.
+Required in answers: `DISK`, `MODE`, identity (`HOSTNAME` `TIMEZONE` `LOCALE`
+`KEYMAP` `USERNAME`), and for AUTO also `ESP_MB` (`1024|2048|4096`). MANUAL
+also needs `EFI_PART` / `ROOT_PART` on that same `DISK` (ESP ≥512 MB,
+ROOT ≥8 GB). `FORMAT_EFI` optional (`0` reuse / `1` format; default `1`).
+`LUKS_WIPE` must be `none|fast|normal` (default `none`).
+`PACMAN_PARALLEL` / `BTRFS_COMPRESS` / `ZRAM_SIZE` optional but must be valid
+if set (defaults `10` / `zstd3` / `half`).
+
+Skips (after validation): DMI/AMD confirms, type-DISK / partition proceed
+confirms, REVIEW UI, final start confirm (plan still logged). Flags accept
+`y`/`yes`/`on`/`1` (not `yellow`); saved as `Y`/`N`. Extra pacstrap packages
+replay via `EXTRA_PKGS_LIST` (space-separated) and/or `T14S_EXTRA_PKGS`.
 
 Hook preset: none / `T14S_DEFAULT_HOOK_URL` / custom HTTPS URL (no private
 repo URL is hardcoded).
@@ -204,8 +219,12 @@ repo URL is hardcoded).
 `HOSTNAME` `TIMEZONE` `LOCALE` `KEYMAP` `USERNAME` · `MODE` `ESP_MB`
 `FORMAT_EFI` `DISK` `EFI_PART` `ROOT_PART` · `BTRFS_COMPRESS`
 (`zstd1`/`zstd3`/`zstd15`/`none`) · `ZRAM_SIZE` (`half`/`quarter`/`8192`) ·
-`REFLECTOR_COUNTRY` · `SKIP_THINKPAD_HW` (auto `Y` in VMs). Prefer `Y`/`N`.
-Passwords are **never** stored in answers.
+`REFLECTOR_COUNTRY` · `SKIP_THINKPAD_HW` (auto `Y` in VMs) ·
+`CLEAN_ESP_ARCH` (default `Y`: remove old Arch UKIs, `arch*.conf` /
+`linux-*.conf` loader entries, and `EFI/arch` dirs; kernels/ucode always
+cleared to avoid pacstrap conflicts; never touches Windows/other OS dirs) ·
+`EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are **never** stored in answers.
+`answers_save` hard-requires mode `0600`.
 
 ### Message severity
 
@@ -233,11 +252,12 @@ disk path and a second wipe confirm.
 
 ### Safety model
 
-Nothing destructive runs before the final confirm (NONINTERACTIVE: confirm
-skipped after answers + secrets are validated). Log: `/tmp/t14s-install.*.log`.
-Long steps use `dialog --progressbox` when available. Passwords enter chroot
-via a `0600` secrets file (not env), then shred. UKI build fails if ESP free
-space is under 64 MB. `sbctl verify` must pass before enroll.
+Interactive: nothing destructive before the final confirm. Unattended: wipe
+starts after answers + `T14S_PASS_FILE` + `T14S_I_WILL_ERASE=1` validate (no
+confirm UI). Log: `/tmp/t14s-install.*.log`. Long steps use
+`dialog --progressbox` when available. Passwords enter chroot via a `0600`
+file (not env), then shred. UKI build fails if ESP free space is under 64 MB.
+`sbctl verify` must pass before enroll.
 
 Stuck on pacstrap? Other TTY (`Ctrl+Alt+F2`): `tail -f /tmp/t14s-install.*.log`
 
@@ -259,18 +279,119 @@ t14s-selftest   # if that option was enabled
 
 Same notes land in `/root/t14s-post-install.txt`.
 
-* **GNOME:** GDM Wayland. Chrome: Flatpak helper or
-  `flatpak install --system -y flathub com.google.Chrome`
+* **GNOME:** GDM Wayland. Chrome helper (if enabled) uses
+  `flatpak install --user -y flathub com.google.Chrome`
+  (system-wide also fine: `flatpak install --system -y flathub com.google.Chrome`)
 * **No GNOME:** getty login; later
   `pacman -S gnome-shell gdm flatpak && systemctl enable gdm`
 
-### Secure Boot (optional)
+---
 
-1. BIOS → clear keys → Setup Mode  
-2. `sudo sbctl enroll-keys -m`  
-3. BIOS → Secure Boot → Enabled  
+## ESP / EFI layout (why files look “scattered”)
 
-`-m` keeps Microsoft keys (Windows multiboot).
+The ESP is **FAT**. UEFI, systemd-boot, and UKIs each use **fixed** paths.
+That is normal, not installer clutter.
+
+| Path on ESP | Role | Who owns it |
+| ----------- | ---- | ----------- |
+| `EFI/Linux/arch-linux-*.efi` | Unified Kernel Images | mkinitcpio UKI presets |
+| `EFI/systemd/systemd-bootx64.efi` | systemd-boot binary | `bootctl install` |
+| `EFI/BOOT/BOOTX64.EFI` | Removable / fallback loader | Firmware default path |
+| `loader/loader.conf` | Default entry, timeout | systemd-boot (ESP root) |
+| `loader/entries/*.conf` | Classic type-1 entries | Legacy / other tools |
+
+**Leftovers from older installs:**
+
+| Path | When removed | Typical source |
+| ---- | ------------ | -------------- |
+| ESP root `vmlinuz-linux*`, `initramfs-linux*`, `*-ucode.img` | **Always** (pacstrap safety) | Pre-UKI / bare kernel on ESP |
+| `EFI/Linux/arch*.efi` | `CLEAN_ESP_ARCH=Y` | Prior Arch UKIs |
+| `EFI/arch/` (also `Arch` / `ARCH`) | `CLEAN_ESP_ARCH=Y` | Old GRUB vendor dir |
+| `loader/entries/arch*.conf` / `linux-*.conf` | `CLEAN_ESP_ARCH=Y` | Pre-UKI systemd-boot (**note:** `linux-*.conf` matches any distro using that name on a shared ESP) |
+
+### Can everything live under one directory?
+
+**No**, not with stock systemd-boot + UKIs:
+
+* Firmware expects `EFI/BOOT/BOOTX64.EFI`.
+* systemd-boot expects `EFI/systemd/` and `loader/` at the ESP root.
+* UKI convention is `EFI/Linux/*.efi` (other paths need hand-written entries).
+
+You can put UKIs under e.g. `EFI/arch/` only with custom `loader/entries`
+and more update fragility. This installer keeps the standard layout and uses
+`CLEAN_ESP_ARCH` so **old Arch junk** does not pile up across dirs.
+Windows / other OS vendor dirs are never touched.
+
+### `CLEAN_ESP_ARCH` (Core checklist, default `Y`)
+
+| Always removed (pacstrap safety) | Also removed when `CLEAN_ESP_ARCH=Y` |
+| -------------------------------- | ----------------------------------- |
+| `vmlinuz-linux*`, `initramfs-linux*` | `EFI/Linux/arch*.efi` UKIs |
+| `amd-ucode.img`, `intel-ucode.img` | `loader/entries` matching `arch*.conf` or `linux-*.conf` |
+| | `EFI/arch`, `EFI/Arch`, `EFI/ARCH` |
+
+Fresh-format ESP already empty (`FORMAT_EFI=1` forces `CLEAN_ESP_ARCH=Y`).
+`CLEAN_ESP_ARCH=N` keeps prior Arch UKIs/entries; kernels/ucode still cleared.
+Does not remove `EFI/Microsoft`, `EFI/ubuntu`, or other non-Arch vendor dirs.
+
+---
+
+## Securing the EFI (ESP)
+
+The ESP is readable FAT. You **cannot** LUKS-encrypt it the way root is
+encrypted. Security is a **signed boot chain** + locked firmware + LUKS for
+data.
+
+### What this installer already does
+
+* Builds UKIs and signs them with **`sbctl`** (plus systemd-boot / `BOOTX64.EFI`)
+* Optional enroll when Setup Mode is on **and** `sbctl verify` passes
+* LUKS2 on root; no secrets written to the ESP
+* Optional Arch ESP cleanup (`CLEAN_ESP_ARCH`)
+
+### After first boot (recommended)
+
+1. BIOS: clear Secure Boot keys → **Setup Mode** (if not already)
+2. In the installed OS:
+
+```bash
+sbctl status
+sbctl verify
+# Only when Setup Mode is enabled and verify is clean:
+sudo sbctl enroll-keys -m
+```
+
+3. BIOS: Secure Boot → **Enabled**; set a **supervisor** password; prefer
+   internal NVMe first; disable unused USB/network boot if policy allows
+
+`-m` keeps Microsoft keys so Windows can still boot on a shared ESP. Other
+unsigned Linux loaders will not boot under SB until signed, e.g.
+`sudo sbctl sign -s /path/to/loader.efi` (installer uses `sbctl sign -s`).
+
+### After kernel / boot updates
+
+Pacman hooks from `sbctl` should resign UKIs. If something fails to boot or
+verify looks wrong:
+
+```bash
+sudo sbctl verify
+sudo sbctl sign-all          # resign everything sbctl tracks
+# or: sudo sbctl sign -s /boot/EFI/Linux/arch-linux-lts.efi
+```
+
+### Do / don’t
+
+| Do | Don’t |
+| -- | ----- |
+| Enable SB after enroll | Leave Setup Mode / SB off “for convenience” |
+| Keep BIOS supervisor password | Put LUKS passphrases or keyfiles on the ESP |
+| Run `sbctl verify` after big updates | Assume ESP paths are secret (they are not) |
+| Use `CLEAN_ESP_ARCH` on reinstall | Wipe `EFI/Microsoft` / other OS dirs by hand unless you mean it |
+
+### Stronger options (not in this script)
+
+* TPM2 PCR-bound LUKS (`systemd-cryptenroll` / Clevis) — less typing, harder recovery
+* Boot from a separate USB ESP — smaller local attack surface, worse UX
 
 ---
 
@@ -307,7 +428,8 @@ T14S_EXTRA_PKGS='htop tmux' bash install.sh
 T14S_ANSWERS=/tmp/t14s-answers.env bash install.sh
 T14S_PASS_FILE=/root/t14s-pass.env   # chmod 600
 T14S_DEFAULT_HOOK_URL=https://…      # optional hook preset
-T14S_NONINTERACTIVE=1 T14S_ANSWERS=… T14S_PASS_FILE=… bash install.sh
+T14S_NONINTERACTIVE=1 T14S_I_WILL_ERASE=1 \
+  T14S_ANSWERS=… T14S_PASS_FILE=… bash install.sh
 ```
 
 GitHub Actions: smoke + shellcheck on push.
