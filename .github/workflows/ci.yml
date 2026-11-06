@@ -12,3 +12,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Smoke
         run: bash tests/smoke.test.sh
+      - name: ShellCheck
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -S warning -e SC2015,SC2086,SC2162 install.sh

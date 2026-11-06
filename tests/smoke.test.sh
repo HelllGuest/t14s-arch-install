@@ -100,6 +100,173 @@ grep -q 'log "View install log"' "$ROOT/install.sh" \
   || fail "menus must expose log viewer entry"
 grep -q 'sshd "Enable SSH' "$ROOT/install.sh" \
   || fail "checklist must offer sshd option"
+grep -q 'pick_keymap' "$ROOT/install.sh" || fail "must offer archfi-style keymap picker"
+grep -q 'pick_timezone' "$ROOT/install.sh" || fail "must offer archfi-style timezone picker"
+grep -q 'pt-latin1' "$ROOT/install.sh" || fail "common keymaps must use real map names"
+grep -q 'br-abnt2' "$ROOT/install.sh" || fail "common keymaps must use real map names"
+grep -q 'jp106' "$ROOT/install.sh" || fail "common keymaps must use real map names"
+grep -q 'browse_args' "$ROOT/install.sh" || fail "keymap browse must not clobber commons menu"
+grep -q "s/\\\\.map(\\\\.gz)?\\$//" "$ROOT/install.sh" \
+  || grep -q 's/\.map(\.gz)?$//' "$ROOT/install.sh" \
+  || fail "keymap browse must strip .map/.map.gz only (not %%.*)"
+! grep -q 'km=\${f%%\.\*}' "$ROOT/install.sh" \
+  || fail "keymap browse must not use \${f%%.*}"
+grep -q -- '-f /usr/share/zoneinfo' "$ROOT/install.sh" \
+  || fail "timezone validator must require a zone file (-f)"
+grep -q 'LUKS_WIPE' "$ROOT/install.sh" || fail "must offer optional LUKS mapper wipe"
+grep -q 'rc == 0 || rc == 1' "$ROOT/install.sh" || fail "LUKS wipe must treat dd exit 1 as success only"
+grep -q 'PACMAN_PARALLEL' "$ROOT/install.sh" || fail "must offer ParallelDownloads choice"
+grep -q '#\\?ParallelDownloads' "$ROOT/install.sh" \
+  || fail "chroot ParallelDownloads sed must match commented or live lines"
+grep -q 'skip_reflector' "$ROOT/install.sh" || fail "checklist must offer skip reflector"
+grep -q 'INSTALL_CUPS' "$ROOT/install.sh" || fail "must offer archdi-style CUPS option"
+grep -q 'nerd_fonts' "$ROOT/install.sh" || fail "checklist must offer nerd_fonts"
+grep -q 'ttf-jetbrains-mono-nerd' "$ROOT/install.sh" || fail "must install JetBrains Mono Nerd"
+grep -q 'ttf-meslo-nerd' "$ROOT/install.sh" || fail "must install Meslo Nerd"
+grep -q 'ttf-nerd-fonts-symbols-common' "$ROOT/install.sh" || fail "must install nerd symbols"
+grep -q 'INSTALL_NERD_FONTS' "$ROOT/install.sh" || fail "must gate nerd fonts install"
+grep -A20 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'INSTALL_NERD_FONTS=' \
+  || fail "arch-chroot env must pass INSTALL_NERD_FONTS"
+grep -q 'answers_save' "$ROOT/install.sh" || fail "must save T14S answers file"
+grep -q 'answers_load' "$ROOT/install.sh" || fail "must load T14S_ANSWERS"
+grep -q 'T14S_NONINTERACTIVE' "$ROOT/install.sh" || fail "must honor T14S_NONINTERACTIVE"
+grep -q 'Install profile' "$ROOT/install.sh" || fail "must offer gnome/dev/minimal presets"
+grep -q 'smartctl -H' "$ROOT/install.sh" || fail "must SMART-check target disk"
+grep -q 'INSTALL_CLI' "$ROOT/install.sh" || fail "must offer CLI tools bundle"
+grep -q 'INSTALL_PODMAN' "$ROOT/install.sh" || fail "must offer podman"
+grep -q 'INSTALL_DOCKER' "$ROOT/install.sh" || fail "must offer docker"
+grep -q 'INSTALL_VIRT' "$ROOT/install.sh" || fail "must offer libvirt/qemu"
+grep -q 'INSTALL_AVAHI' "$ROOT/install.sh" || fail "must offer avahi"
+grep -q 'INSTALL_STARSHIP' "$ROOT/install.sh" || fail "must offer starship"
+grep -q 'POST_HOOK_URL' "$ROOT/install.sh" || fail "must offer post-install hook URL"
+grep -q 'prefer-dark' "$ROOT/install.sh" || fail "must ship GNOME dark dconf defaults"
+grep -q 'JetBrainsMono Nerd Font' "$ROOT/install.sh" || fail "must set Console Nerd Font"
+grep -q 'install-chrome-flatpak.sh' "$ROOT/install.sh" || fail "must offer Chrome helper script"
+grep -q 'arch-chroot /mnt' "$ROOT/install.sh" || fail "recovery docs / hook must mention arch-chroot"
+grep -q 'Core extras' "$ROOT/install.sh" || fail "must split Core checklist"
+grep -q 'Dev / CLI tools' "$ROOT/install.sh" || fail "must split Dev/CLI checklist"
+grep -q 'Network / security' "$ROOT/install.sh" || fail "must split Network checklist"
+grep -q 'yn_on "\$DESKTOP"' "$ROOT/install.sh" || fail "TLP guard must use yn_on"
+grep -q 'set -o pipefail' "$ROOT/install.sh" || fail "post-hook must use pipefail"
+grep -q 'T14S_POST_HOOK_I_UNDERSTAND' "$ROOT/install.sh" \
+  || fail "post-hook NONINTERACTIVE must require explicit opt-in"
+grep -q 'mdns_minimal' "$ROOT/install.sh" || fail "avahi path must patch nsswitch mdns_minimal"
+grep -q 'jail.d/sshd.local' "$ROOT/install.sh" || fail "fail2ban must enable sshd jail"
+grep -q 'using DISK from answers' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must honor DISK from answers"
+grep -q 'timezone from answers' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must honor TIMEZONE from answers"
+grep -q 'T14S_PASS_FILE' "$ROOT/install.sh" || fail "must support T14S_PASS_FILE"
+grep -q 'secrets_load' "$ROOT/install.sh" || fail "must define secrets_load"
+grep -q 'MANUAL partitions from answers' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE MANUAL must honor EFI_PART/ROOT_PART"
+grep -q 'SKIP_THINKPAD_HW' "$ROOT/install.sh" || fail "must detect/skip ThinkPad HW on VM"
+grep -q 'INSTALL_SNAPPER_HOME' "$ROOT/install.sh" || fail "must offer snapper home"
+grep -q 'ESP free after UKI\|ESP nearly full after UKI' "$ROOT/install.sh" \
+  || fail "must check ESP free space after UKI build"
+grep -q 'sbctl verify' "$ROOT/install.sh" || fail "must run sbctl verify"
+grep -q 'enroll skipped — sbctl verify failed' "$ROOT/install.sh" \
+  || fail "must block enroll when sbctl verify fails"
+grep -q 't14s-selftest' "$ROOT/install.sh" || fail "must offer BT/audio self-test"
+grep -q 'BTRFS_COMPRESS' "$ROOT/install.sh" || fail "must offer Btrfs compression radio"
+grep -q 'ZRAM_SIZE' "$ROOT/install.sh" || fail "must offer zram size radio"
+grep -q 'REFLECTOR_COUNTRY' "$ROOT/install.sh" || fail "must honor reflector country"
+grep -q 'T14S_DEFAULT_HOOK_URL' "$ROOT/install.sh" || fail "must offer hook env preset"
+grep -q 'xdg-user-dirs-update' "$ROOT/install.sh" || fail "must run xdg-user-dirs-update"
+grep -q 'INSTALL_LINUX_STABLE' "$ROOT/install.sh" || fail "must offer optional linux UKI"
+grep -q 'INSTALL_PLYMOUTH' "$ROOT/install.sh" || fail "must offer optional plymouth"
+grep -q 'Answers schema' "$ROOT/README.md" || fail "README must document answers schema"
+grep -q 'NONINTERACTIVE: skipping REVIEW/confirm' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must skip REVIEW/final confirm"
+grep -q 'NONINTERACTIVE AUTO: will erase' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must skip AUTO type-DISK wipe confirm"
+grep -q 'NONINTERACTIVE needs LUKS_PASS' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must die early without LUKS_PASS"
+# Early LUKS die must appear before ui_password for LUKS
+python3 - "$ROOT/install.sh" <<'PY' || fail "NONINTERACTIVE LUKS die must precede ui_password"
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+die_i = t.find("NONINTERACTIVE needs LUKS_PASS")
+pw_i = t.find("ui_password 'LUKS passphrase'")
+assert die_i > 0 and pw_i > 0 and die_i < pw_i, (die_i, pw_i)
+print("ok LUKS die order")
+PY
+grep -q 'part_on_disk' "$ROOT/install.sh" || fail "MANUAL answers must verify part_on_disk"
+grep -q 'yn_canon' "$ROOT/install.sh" || fail "must canonicalize flags to Y/N"
+grep -q 'chmod 600' "$ROOT/install.sh" || fail "answers_save / secrets must chmod 600"
+grep -q 'must be mode 0600' "$ROOT/install.sh" || fail "secrets_load must require mode 0600"
+# Chroot body must define yn_on and not leave stray ] after yn_on calls
+python3 - "$ROOT/install.sh" <<'PY' || fail "chroot yn_on gates broken"
+from pathlib import Path
+import re, sys, subprocess, tempfile
+t = Path(sys.argv[1]).read_text()
+start = t.find("<<'CHROOT'\\n")
+if start < 0:
+    start = t.find("<<'CHROOT'\n")
+assert start > 0
+start = t.find("\n", start) + 1
+end = t.find("\nCHROOT\n", start)
+body = t[start:end]
+assert "yn_on() {" in body, "chroot missing yn_on"
+assert not re.search(r'yn_on[^\n]*"\]', body), "stray ] after yn_on"
+assert not re.search(r'\$\{(?:INSTALL_|SKIP_|DESKTOP|ENROLL_|ENABLE_|UFW_)[A-Z0-9_]*\^\^\}', body), \
+    "chroot still uses ^^ on feature flags"
+assert "sd-encrypt" in body and "HOOKS missing sd-encrypt" in body
+with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+    f.write(body)
+    name = f.name
+subprocess.check_call(["bash", "-n", name])
+print("ok chroot yn_on + bash -n")
+PY
+grep -q 'xdg-user-dirs' "$ROOT/install.sh" || fail "must pacstrap or call xdg-user-dirs"
+grep -q 'sudo -u "\$USERNAME" tee -a' "$ROOT/install.sh" \
+  || fail "starship must append zshrc as the user"
+! grep -q "gtk-theme='Adwaita-dark'" "$ROOT/install.sh" \
+  || fail "dconf must not set stale Adwaita-dark gtk-theme"
+python3 - "$ROOT/install.sh" <<'PY' || fail "JetBrainsMono dconf must be gated on INSTALL_NERD_FONTS"
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+i = t.find("monospace-font-name='JetBrainsMono Nerd Font Mono 11'")
+assert i > 0, "monospace line missing"
+window = t[max(0, i - 400):i]
+assert "INSTALL_NERD_FONTS" in window, "JetBrainsMono dconf not under INSTALL_NERD_FONTS gate"
+print("ok nerd dconf gate")
+PY
+grep -q 'yn_on "\$INSTALL_CHROME_HINT"' "$ROOT/install.sh" \
+  || fail "chrome hint must use yn_on"
+grep -q 'set-x11-keymap' "$ROOT/install.sh" || fail "GNOME path must set X11 keymap from console map"
+grep -q 'XKB_LAYOUT=gb' "$ROOT/install.sh" || fail "XKB remap must map uk → gb"
+grep -q 'XkbVariant' "$ROOT/install.sh" || fail "XKB conf must support variants (dvorak/colemak/abnt2)"
+grep -q 'write_xkb_conf\|00-keyboard.conf' "$ROOT/install.sh" \
+  || fail "must write 00-keyboard.conf when localectl fails"
+grep -A6 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'INSTALL_CUPS=' \
+  || fail "arch-chroot env must pass INSTALL_CUPS"
+grep -A6 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'PACMAN_PARALLEL=' \
+  || fail "arch-chroot env must pass PACMAN_PARALLEL"
+grep -q 'bash-completion' "$ROOT/install.sh" || fail "must offer archdi console tools"
+grep -q 'T14S_EXTRA_PKGS' "$ROOT/install.sh" || fail "must honor T14S_EXTRA_PKGS / free-form extras"
+grep -q 'locale=%s' "$ROOT/install.sh" || fail "DRYRUN dump must include locale"
+grep -q 'archfi' "$ROOT/README.md" || fail "README must credit archfi adaptations"
+grep -q 'archdi' "$ROOT/README.md" || fail "README must credit archdi adaptations"
+# keymap basename strip unit (no dialog)
+python3 - <<'PY' || fail "keymap .map.gz strip logic wrong"
+import re
+samples = {
+  "us.map.gz": "us",
+  "lt.baltic.map.gz": "lt.baltic",
+  "lt.l4.map.gz": "lt.l4",
+  "defkeymap_V1.0.map.gz": "defkeymap_V1.0",
+  "pt-latin1.map.gz": "pt-latin1",
+  "br-abnt2.map": "br-abnt2",
+}
+pat = re.compile(r"\.map(\.gz)?$")
+for src, want in samples.items():
+  got = pat.sub("", src)
+  assert got == want, (src, got, want)
+print("ok keymap strip")
+PY
 # Prefer dialog over whiptail for progressbox
 grep -q 'Prefer dialog' "$ROOT/install.sh" \
   || grep -A2 'command -v dialog' "$ROOT/install.sh" | grep -q 'UI=dialog' \

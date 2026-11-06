@@ -1,35 +1,161 @@
 # t14s-arch-install
 
-Interactive hardened **Arch Linux** installer for **Lenovo ThinkPad T14s Gen 3 AMD**
+Hardened **Arch Linux** installer for **Lenovo ThinkPad T14s Gen 3 AMD**
 (machine type **21CQ / 21CR**; example MTM `21CRS1PU00`).
 
-## What you get
+One curl-able script (`install.sh`). Interactive TUI by default; unattended
+with answers + a secrets file. Profile is fixed for Rembrandt (not a generic
+Arch installer).
 
-* LUKS2 (argon2id) full-disk encryption
-* Btrfs subvolumes (`@` `@home` `@snapshots` `@var_log` `@var_cache` `@tmp`)
-* `linux-lts` (primary) + `linux-hardened` (fallback) as Unified Kernel Images
-* systemd-boot + `sbctl` Secure Boot keys/signing
-* Minimal GNOME Wayland (**optional**), zram, AppArmor, UFW, Snapper
-* AMD defaults: `amd-ucode`, `amd_iommu=on`, `amd_pstate=active`, s2idle
-* With GNOME: `mesa` + `vulkan-radeon` + `fprintd` + `sof-firmware`
-* Battery charge window **70–80** (ThinkPad `BAT*`): tmpfiles +
-  `thinkpad-charge-thresholds.service` (`After=multi-user.target`, waits for sysfs).
-  No-op on VMs without a battery.
+UX ideas adapted from [archfi](https://github.com/MatMoul/archfi) and
+[archdi-pkg](https://github.com/MatMoul/archdi-pkg). Not ported: i18n packs,
+DE zoo, AUR helpers, iptables (UFW kept), multi-bootloader/FS, BIOS modes.
+
+---
+
+## What and why (short)
+
+| Goal | Choice | Why |
+| ---- | ------ | --- |
+| Encrypt disk | LUKS2 + argon2id | Modern default; strong KDF |
+| Filesystem | Btrfs subvols + Snapper | Snapshots / rollbacks |
+| Kernels | `linux-lts` UKI + `linux-hardened` UKI | Stable daily driver + hardened fallback |
+| Boot | systemd-boot + `sbctl` | Simple EFI; Secure Boot ready |
+| Desktop | Optional minimal GNOME Wayland | Optional; Rembrandt GPU/audio/FP wired when on |
+| Laptop power | Charge window 70–80; PPD or TLP | Battery longevity; no TLP under GNOME |
+| Host hardening | AppArmor, UFW, sysctl, zram | Useful defaults without DIY |
+
+---
+
+## Always installed (base)
+
+Pacstrapped into the new root every run:
+
+| Package / piece | Role |
+| --------------- | ---- |
+| `base` `base-devel` | Minimal Arch userland + build tools |
+| `linux-lts` (+ headers) | Primary kernel → UKI |
+| `linux-hardened` (+ headers) | Fallback kernel → UKI |
+| `linux-firmware` `amd-ucode` | Firmware + AMD microcode (Rembrandt) |
+| `btrfs-progs` `cryptsetup` | Btrfs + LUKS |
+| `bluez` `bluez-utils` | Bluetooth stack |
+| `networkmanager` | Network (enabled) |
+| `sudo` `zsh` `git` `vim` `nano` | Admin shell defaults (user shell = zsh) |
+| `reflector` `pacman-contrib` | Mirror refresh (live + weekly timer) |
+| `mkinitcpio` | UKI / initramfs build |
+| `snapper` `snap-pac` | Root snapshots (+ pacman hooks) |
+| `zram-generator` | Compressed RAM swap |
+| `apparmor` `ufw` | MAC + firewall (enabled) |
+| `sbctl` `efibootmgr` | Secure Boot keys / EFI boot entries |
+| `xdg-user-dirs` | `~/Downloads` etc. via `xdg-user-dirs-update` |
+
+**Always configured (not always “a package”):**
+
+* GPT layout (AUTO) or selected parts (MANUAL)
+* LUKS2 on root; Btrfs subvolumes
+  `@` `@home` `@snapshots` `@var_log` `@var_cache` `@tmp` (`@tmp` = nodatacow)
+* Mount options: `compress=` from wizard (`zstd3` default)
+* Kernel cmdline: `rd.luks.name=…`, `amd_iommu=on`, `amd_pstate=active`,
+  `mem_sleep_default=s2idle`, AppArmor
+* systemd-boot; UKIs under `/boot/EFI/Linux/`
+* Sysctl hardening (`99-security.conf` + Flatpak userns for hardened)
+* ThinkPad charge 70–80 (tmpfiles + oneshot) unless `SKIP_THINKPAD_HW=Y` (VMs)
+
+---
+
+## Optional adds (wizard / answers)
+
+Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklists.
+
+### Core checklist
+
+| Toggle | Adds / does | Why |
+| ------ | ----------- | --- |
+| GNOME | Shell, GDM, portals, PipeWire, Flatpak browsers/VPN, `mesa`/`vulkan-radeon`, sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
+| Nerd Fonts | Curated `ttf-*-nerd` + Inter/Noto; GNOME mono font | Readable terminals / editors |
+| Enroll sbctl now | `sbctl enroll-keys -m` if Setup Mode **and** `sbctl verify` OK | Optional first-boot SB |
+| sshd | `openssh` + UFW 22/tcp | Remote rescue |
+| CUPS | `cups` `cups-pdf` `ghostscript` | Printing |
+| Skip reflector | Keep ISO mirrorlist | Flaky/offline networks |
+| TLP | `tlp` (forced off if GNOME) | Console-only power mgmt |
+| thinkfan note | `/root/t14s-thinkfan.txt` (AUR; not pacstrapped) | Fan control hint |
+| Snapper `@home` | `snapper -c home` | Home snapshots |
+| `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
+| Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
+| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW check |
+| Chrome helper | `~/install-chrome-flatpak.sh` | Chrome needs post-boot Flatpak userns |
+
+### Dev / CLI checklist
+
+| Toggle | Adds |
+| ------ | ---- |
+| CLI bundle | `ripgrep` `fd` `fzf` `bat` `eza` `jq` `git-delta` |
+| starship | Prompt + wire into user `.zshrc` |
+| podman | `podman` `buildah` (rootless) |
+| docker | `docker` `docker-compose`; user in `docker` group |
+| virt | `libvirt` `qemu-desktop` `virt-manager` …; user in `libvirt` |
+| extras | Optional: htop, tmux, rsync, bash-completion, wget, usbutils, lsof, dmidecode, powertop, mc, traceroute, bind, smartmontools |
+
+### Network checklist
+
+| Toggle | Adds |
+| ------ | ---- |
+| avahi | `avahi` `nss-mdns` + `nsswitch` mdns |
+| wireguard | `wireguard-tools` |
+| tailscale | `tailscale` (enabled) |
+| fail2ban | `fail2ban` + sshd jail |
+| UFW Syncthing / KDE Connect | Port allows only |
+
+Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
+
+---
+
+## Modified (live ISO + new system)
+
+| Where | Change | Why |
+| ----- | ------ | --- |
+| Live ISO `pacman.conf` | `XferCommand` curl retries; `ParallelDownloads` | Reliable pacstrap |
+| Live mirrors | Optional `reflector` (country optional) | Faster/fresher mirrors |
+| Target `/etc/mkinitcpio.conf` | systemd + `sd-encrypt` (+ plymouth if chosen) | LUKS unlock in UKI |
+| Target `/etc/kernel/cmdline` | Rembrandt + LUKS + s2idle + AppArmor | One cmdline for all UKIs |
+| Target `/etc/fstab` | UUID mounts; `/tmp` gets `nofail` | Boot even if `@tmp` fails |
+| Target pacman / reflector.conf | ParallelDownloads; weekly reflector | Same mirror story post-boot |
+| Target UFW | deny in / allow out; enabled | Firewall on first boot |
+| Target sudoers | `%wheel` enabled | User admin |
+| ESP | Format or reuse; stale Arch UKIs cleaned on reuse | Multiboot-safe |
+| Answers files | `/tmp/t14s-answers.env` + `/root/t14s-answers.env` mode `0600` | Replay installs |
+
+---
+
+## Removed / cleaned
+
+| Action | Why |
+| ------ | --- |
+| `wipefs` + LUKS format on ROOT (and ESP if format) | Clean install surface |
+| Optional LUKS mapper `dd` wipe | Paranoia before `mkfs.btrfs` |
+| AUTO: entire disk GPT rewrite | Single-disk dedicated install |
+| Non-UKI `initramfs-*.img` after UKI build | Free ESP space |
+| Stale `arch-linux*.efi` / old loader entries on ESP reuse | Avoid dual-boot clutter |
+| `/root/.t14s-install-secrets` + chroot script shredded | Passwords not left on disk |
+| Chrome Flatpak **not** installed in chroot | bwrap userns fails in chroot |
+
+---
 
 ## Requirements
 
 * Arch ISO, **UEFI**, root shell, working network
-* Target hardware type **21CQ** or **21CR** (soft DMI check)
-* **AuthenticAMD** CPU (confirm to force on a non-AMD VM)
-* A target disk with room for the ESP plus an 8 GB root (AUTO needs a whole disk;
-  MANUAL can keep the other partitions)
-* For a shared/multiboot ESP: an existing FAT32 partition of 1 GB or more
+* Soft DMI check for **21CQ / 21CR** (confirm or NONINTERACTIVE warn-and-continue)
+* **AuthenticAMD** (same)
+* Disk with ESP + ≥8 GB root (AUTO = whole disk; MANUAL = pick parts)
+* Shared ESP: existing FAT32, ideally ≥1 GB
 
 ## BIOS (F1)
 
-* Secure Boot: **Disabled** for the install (enroll keys later)
-* Sleep State: **Windows and Linux** (s2idle)
-* Enable AMD **SVM** + **IOMMU**
+* Secure Boot: **Disabled** for install (enroll later)
+* Sleep: **Windows and Linux** (s2idle)
+* AMD **SVM** + **IOMMU** on
+
+---
 
 ## Run (from the Arch ISO)
 
@@ -37,76 +163,85 @@ Interactive hardened **Arch Linux** installer for **Lenovo ThinkPad T14s Gen 3 A
 bash <(curl -fsSL https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/main/install.sh)
 ```
 
-Prefer process substitution (`bash <(curl …)`) so the UI keeps a real TTY.
-The installer prefers **`dialog`** (progress box + checklist + colored
-severity boxes); falls back to `whiptail` (NEWT palettes), then plain prompts.
-Override: `T14S_UI=dialog|whiptail|plain`.
+Prefer `bash <(curl …)` so menus keep a real TTY.
+UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whiptail|plain`.
 
 ### Screens
 
-1. Hardware warnings (DMI / AMD), each with a safe default
-2. Target disk picker (retries on invalid input; partitions are rejected)
-3. Partition mode, then either:
-   * **AUTO** — choose the ESP size (`1G`, `2G` default, `4G`); the rest becomes
-     LUKS2. Rejected if the disk cannot also hold an 8 GB root.
-   * **MANUAL** — pick ROOT, then pick EFI; both come from a list showing size,
-     filesystem and partition type, with a "type a path" escape. The disk itself
-     is filtered out. ROOT is the only partition written.
-4. Manual guards: EFI and ROOT must differ, reuse needs an existing FAT32 ESP,
-   and an ESP under 512 MB or a ROOT under 8 GB needs an explicit confirmation
-5. LUKS passphrase (entered twice)
-6. Hostname (default `thinkpad-t14s`), timezone, locale, keymap
-7. Username (non-empty, not `root`, lowercase POSIX) + user/root passwords
-8. **Checklist** extras (Space toggles): GNOME, Secure Boot enroll, enable sshd
-9. Review screen with per-partition actions and sizes, then a final confirm
+1. Hardware warnings (DMI / AMD)
+2. Profile preset: `gnome` / `dev` / `minimal`
+3. Disk + SMART hint
+4. AUTO / MANUAL partitioning
+5. LUKS passphrase + optional mapper wipe
+6. Hostname, timezone, locale, keymap
+7. User + passwords
+8. ParallelDownloads, Btrfs compress, zram size
+9. Core / Dev / Network checklists
+10. Reflector country (if not skipped), hook preset, extra packages
+11. REVIEW → confirm → answers saved
+
+### Unattended
+
+```bash
+T14S_NONINTERACTIVE=1 \
+T14S_ANSWERS=/path/to/t14s-answers.env \
+T14S_PASS_FILE=/path/to/secrets.env \   # mode 0600; LUKS_PASS USER_PASS ROOT_PASS
+T14S_POST_HOOK_I_UNDERSTAND=1 \         # only if POST_HOOK_URL set
+bash install.sh
+```
+
+Skips: DMI/AMD confirms, AUTO type-DISK wipe confirm, REVIEW UI, final start
+confirm (plan still logged). MANUAL parts must sit on `DISK`; ESP ≥512 MB,
+ROOT ≥8 GB. Flags (`Y`/`N`/`on`/`1`) become `Y`/`N` before chroot.
+
+Hook preset: none / `T14S_DEFAULT_HOOK_URL` / custom HTTPS URL (no private
+repo URL is hardcoded).
+
+### Answers schema (known keys)
+
+`PRESET` `DESKTOP` `INSTALL_*` · `ENROLL_SB` `ENABLE_SSHD` `SKIP_REFLECTOR`
+`UFW_SYNCTHING` `UFW_KDECONNECT` `POST_HOOK_URL` · `PACMAN_PARALLEL` `LUKS_WIPE`
+`HOSTNAME` `TIMEZONE` `LOCALE` `KEYMAP` `USERNAME` · `MODE` `ESP_MB`
+`FORMAT_EFI` `DISK` `EFI_PART` `ROOT_PART` · `BTRFS_COMPRESS`
+(`zstd1`/`zstd3`/`zstd15`/`none`) · `ZRAM_SIZE` (`half`/`quarter`/`8192`) ·
+`REFLECTOR_COUNTRY` · `SKIP_THINKPAD_HW` (auto `Y` in VMs). Prefer `Y`/`N`.
+Passwords are **never** stored in answers.
 
 ### Message severity
 
 Colored message / confirm boxes. Theme base: dark blue screen, cyan chrome,
-yellow focus. Each severity swaps chrome for both backends:
+yellow focus. Each severity swaps chrome for both backends (**per-severity**
+`DIALOGRC` / `NEWT_COLORS`):
 
-* **dialog** — per-severity `DIALOGRC` (screen/title/border/button) plus `\Z`
-  badge in the body
-* **whiptail** — per-severity `NEWT_COLORS` window palette
-
-| Severity   | When used                                      | Chrome   |
-| ---------- | ---------------------------------------------- | -------- |
-| **info**   | help, review, reuse notes, generic notices     | cyan     |
-| **warn**   | welcome banner, bad input retry, small ESP/root | yellow |
-| **error**  | invalid device/path, failed validation         | red      |
-| **critical** | wipe/ESP danger, hard gates, fatal `die`     | red+yellow |
-| **ok**     | install complete                               | green    |
-
-Box height scales with line count (`MH` floor, `H` ceiling) so REVIEW / wipe /
-complete screens are not clipped. Destructive `ui_yesno` confirms (disk erase,
-start install) use the **critical** palette. Failures show a critical box, then
-the log tail.
+| Severity   | When used                                       | Chrome     |
+| ---------- | ----------------------------------------------- | ---------- |
+| **info**   | help, review, reuse notes                       | cyan       |
+| **warn**   | banner, bad input, small ESP/root               | yellow     |
+| **error**  | invalid device/path                             | red        |
+| **critical** | wipe/ESP danger, hard gates, fatal `die`      | red+yellow |
+| **ok**     | install complete                                | green      |
 
 ### Controls
 
-* Arrow keys move; **Space** toggles checklist / radio; **Enter** accepts
-* **Tab** moves to the buttons (`<Ok>`/`<Cancel>`)
-* **Esc** or selecting `<Cancel>` aborts the menu; the install aborts too if a
-  required answer is cancelled
-* Every menu/radio/**checklist** includes **[log]** (scrollable install log) and
-  **[help]** (console tips). Log path: `/tmp/t14s-install.*.log`
-* In MANUAL mode, reuse lists every partition but only FAT32 passes validation
+* Arrows move; **Space** toggles; **Enter** accepts; **Tab** to buttons
+* **Esc** / Cancel aborts that menu (and the install if required)
+* Menus offer **[log]** and **[help]**; log: `/tmp/t14s-install.*.log`
+* MANUAL reuse: any partition listed; only FAT32 validates as ESP
 
-**AUTO mode erases the entire disk.** The disk path must be typed in full and
-the wipe confirmed again.
+**AUTO mode erases the entire disk.** Interactive mode requires typing the
+disk path and a second wipe confirm.
 
 ### Safety model
 
-Nothing is written before the final confirm. Once started, a full log goes to
-`/tmp/t14s-install.*.log`. Long steps (**pacstrap**, **chroot**, reflector) use
-`dialog --progressbox` when available (stdin kept as the command pipe; keys stay
-on the TTY for other widgets), otherwise stream to the console under a banner.
-A failure opens a **critical** box, then the log tail in a textbox.
-Passwords are passed to the chroot through a `0600` file, not the environment,
-and shredded afterwards.
+Nothing destructive runs before the final confirm (NONINTERACTIVE: confirm
+skipped after answers + secrets are validated). Log: `/tmp/t14s-install.*.log`.
+Long steps use `dialog --progressbox` when available. Passwords enter chroot
+via a `0600` secrets file (not env), then shred. UKI build fails if ESP free
+space is under 64 MB. `sbctl verify` must pass before enroll.
 
-If an older installer build looks stuck on pacstrap, open another TTY
-(`Ctrl+Alt+F2`) and run: `tail -f /tmp/t14s-install.*.log`
+Stuck on pacstrap? Other TTY (`Ctrl+Alt+F2`): `tail -f /tmp/t14s-install.*.log`
+
+---
 
 ## After first boot
 
@@ -115,40 +250,50 @@ reboot   # remove the ISO
 lscpu | grep -i ryzen
 cat /sys/power/mem_sleep          # expect [s2idle]
 grep -E 'amd_iommu|amd_pstate' /proc/cmdline
-# ThinkPad only — paths missing on a VM is normal
-cat /sys/class/power_supply/BAT0/charge_control_start_threshold  # expect 70
-cat /sys/class/power_supply/BAT0/charge_control_end_threshold    # expect 80
+# ThinkPad only — missing on a VM is normal
+cat /sys/class/power_supply/BAT0/charge_control_start_threshold  # 70
+cat /sys/class/power_supply/BAT0/charge_control_end_threshold    # 80
 systemctl status thinkpad-charge-thresholds.service --no-pager
+t14s-selftest   # if that option was enabled
 ```
 
-The same checklist is written to `/root/t14s-post-install.txt`.
+Same notes land in `/root/t14s-post-install.txt`.
 
-* **With GNOME (default):** log in at GDM (Wayland). Chrome is skipped in the
-  chroot; optional: `flatpak install --system -y flathub com.google.Chrome`
-* **Without GNOME (`n`):** log in on a virtual console. Optional later:
+* **GNOME:** GDM Wayland. Chrome: Flatpak helper or
+  `flatpak install --system -y flathub com.google.Chrome`
+* **No GNOME:** getty login; later
   `pacman -S gnome-shell gdm flatpak && systemctl enable gdm`
 
 ### Secure Boot (optional)
 
-1. BIOS → clear Secure Boot keys → Setup Mode  
+1. BIOS → clear keys → Setup Mode  
 2. `sudo sbctl enroll-keys -m`  
 3. BIOS → Secure Boot → Enabled  
 
-`-m` keeps Microsoft keys (shared ESP / Windows multiboot).
+`-m` keeps Microsoft keys (Windows multiboot).
+
+---
 
 ## Rehearse in a VM
 
-This repo is the installer only. On a machine that already has the HelllGuest
-dotfiles checkout, you can serve this script from a UEFI qemu harness:
+Installer-only repo. If you already have a UEFI qemu harness that can feed
+this script:
 
 ```bash
-# from a clone of this repo on the host HTTP path, or copy install.sh next to
-# arch-install-vmtest.sh and:
 INSTALLER=install.sh scripts/arch-install-vmtest.sh
 ```
 
-Confirm past the DMI + AMD warnings inside the VM. To rehearse only the screens
-(no disk writes), use `T14S_DRYRUN=1` from a normal shell.
+Or dry-run menus only (no disk writes) from a normal shell:
+
+```bash
+T14S_DRYRUN=1 bash install.sh
+```
+
+`T14S_DRYRUN=1` skips root/UEFI/network checks and does **not**
+`umount`/`swapoff`/`cryptsetup close`. Still needs a TTY for menus.
+NONINTERACTIVE VM runs auto-set `SKIP_THINKPAD_HW=Y`.
+
+---
 
 ## Develop / CI
 
@@ -156,16 +301,16 @@ Confirm past the DMI + AMD warnings inside the VM. To rehearse only the screens
 bash -n install.sh
 bash tests/smoke.test.sh
 
-# walk every screen without touching a disk, and dump the result
 T14S_DRYRUN=1 bash install.sh
-# force a backend: T14S_UI=whiptail | dialog | plain
+T14S_UI=whiptail|dialog|plain bash install.sh
+T14S_EXTRA_PKGS='htop tmux' bash install.sh
+T14S_ANSWERS=/tmp/t14s-answers.env bash install.sh
+T14S_PASS_FILE=/root/t14s-pass.env   # chmod 600
+T14S_DEFAULT_HOOK_URL=https://…      # optional hook preset
+T14S_NONINTERACTIVE=1 T14S_ANSWERS=… T14S_PASS_FILE=… bash install.sh
 ```
 
-`T14S_DRYRUN=1` skips root/UEFI/network checks and does **not** run
-`umount`/`swapoff`/`cryptsetup close` (safe on a normal host). It still needs
-a TTY for the menus.
-
-GitHub Actions runs the same smoke checks on push.
+GitHub Actions: smoke + shellcheck on push.
 
 ## License
 

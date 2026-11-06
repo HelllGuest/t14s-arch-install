@@ -45,7 +45,12 @@ warn() {
 
 DRYRUN=${T14S_DRYRUN:-0}
 UI=${T14S_UI:-plain}
+NONINTERACTIVE=${T14S_NONINTERACTIVE:-0}
+ANSWERS_IN=${T14S_ANSWERS:-}
+PASS_FILE=${T14S_PASS_FILE:-}
 APP_TITLE="T14s Arch Installer"
+PRESET=gnome
+POST_HOOK_URL=""
 LOG="$(mktemp /tmp/t14s-install.XXXXXX.log)"
 LOGGING=0
 DIALOG_RC=""
@@ -771,6 +776,97 @@ pick_part() {
   done
 }
 
+# archfi-inspired pickers: keymap from ISO maps, timezone Region/City menus.
+# Commons must be real map basenames under /usr/share/kbd/keymaps.
+pick_keymap() {
+  local choice km args=() browse_args=()
+  local commons=(us uk de fr es it pt-latin1 br-abnt2 ru jp106 dvorak colemak)
+  for km in "${commons[@]}"; do
+    args+=("$km" "common")
+  done
+  args+=(other "type a keymap name" browse "browse all keymaps on the ISO")
+  while :; do
+    choice="$(ui_menu "Console keymap (applied live with loadkeys)" "${args[@]}")" \
+      || return 1
+    case $choice in
+      other)
+        km="$(ui_input "Keymap name" us)" || return 1
+        [[ -n $km ]] || continue
+        printf '%s' "$km"
+        return 0
+        ;;
+      browse)
+        # Strip only .map.gz / .map — ${f%%.*} collapses lt.baltic → lt.
+        browse_args=()
+        while read -r km; do
+          [[ -n $km ]] || continue
+          browse_args+=("$km" "")
+        done < <(find /usr/share/kbd/keymaps -type f \
+          \( -name '*.map' -o -name '*.map.gz' \) -printf '%f\n' 2>/dev/null \
+          | sed -E 's/\.map(\.gz)?$//' | sort -u)
+        (( ${#browse_args[@]} >= 2 )) \
+          || { ui_error "No keymaps under /usr/share/kbd/keymaps"; continue; }
+        choice="$(ui_menu "All keymaps" "${browse_args[@]}")" || continue
+        printf '%s' "$choice"
+        return 0
+        ;;
+      *)
+        printf '%s' "$choice"
+        return 0
+        ;;
+    esac
+  done
+}
+
+# Emit only a resolvable zone file path (or UTC). Never a directory.
+pick_timezone() {
+  local zroot=/usr/share/zoneinfo region city sub args=() d path
+  [[ -d $zroot ]] || { printf 'UTC'; return 0; }
+  while read -r d; do
+    args+=("$d" "")
+  done < <(find "$zroot" -mindepth 1 -maxdepth 1 -type d \
+    ! -name right ! -name posix -printf '%f\n' 2>/dev/null | sort)
+  args+=(UTC "Coordinated Universal Time" other "type Region/City")
+  region="$(ui_menu "Timezone region" "${args[@]}")" || return 1
+  if [[ $region == other ]]; then
+    city="$(ui_input "Timezone (Region/City)" America/New_York)" || return 1
+    [[ -n $city ]] || return 1
+    printf '%s' "$city"
+    return 0
+  fi
+  if [[ $region == UTC ]]; then
+    printf 'UTC'
+    return 0
+  fi
+  args=()
+  while read -r d; do
+    args+=("$d" "")
+  done < <(find "$zroot/$region" -mindepth 1 -maxdepth 1 \
+    \( -type f -o -type d \) -printf '%f\n' 2>/dev/null | sort)
+  (( ${#args[@]} >= 2 )) || { ui_error "No zones under $region"; return 1; }
+  city="$(ui_menu "Timezone city ($region)" "${args[@]}")" || return 1
+  path="$region/$city"
+  # One nested level (e.g. America/Argentina/Buenos_Aires).
+  if [[ -d $zroot/$path ]]; then
+    args=()
+    while read -r d; do
+      args+=("$d" "")
+    done < <(find "$zroot/$path" -mindepth 1 -maxdepth 1 \
+      \( -type f -o -type d \) -printf '%f\n' 2>/dev/null | sort)
+    if (( ${#args[@]} < 2 )); then
+      ui_error "No zone files under $path"
+      return 1
+    fi
+    sub="$(ui_menu "Timezone ($path)" "${args[@]}")" || return 1
+    path="$path/$sub"
+  fi
+  if [[ ! -f $zroot/$path ]]; then
+    ui_error "Not a timezone file: $path"
+    return 1
+  fi
+  printf '%s' "$path"
+}
+
 # ── 0. preflight ────────────────────────────────────────────
 if (( ! DRYRUN )); then
   [[ $EUID -eq 0 ]] || die "run as root (from the Arch ISO)"
@@ -806,60 +902,287 @@ _dmi="$(cat /sys/class/dmi/id/product_family /sys/class/dmi/id/product_version \
           /sys/class/dmi/id/product_name /sys/class/dmi/id/product_sku 2>/dev/null \
         | tr '\n' ' ')"
 if ! echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
-  ui_yesno "DMI is NOT T14s Gen 3 AMD type 21CQ/21CR:
+  if (( NONINTERACTIVE )); then
+    warn "NONINTERACTIVE: DMI not 21CQ/21CR (${_dmi:-unknown}) — continuing"
+  else
+    ui_yesno "DMI is NOT T14s Gen 3 AMD type 21CQ/21CR:
 ${_dmi:-unknown}
 
 Continue only if intentional (VM rehearsal / forced). Wrong machine? Abort." no critical \
-    || die "aborted — this installer is for type 21CQ/21CR only"
+      || die "aborted — this installer is for type 21CQ/21CR only"
+  fi
 fi
 if ! grep -q AuthenticAMD /proc/cpuinfo; then
-  ui_yesno "CPU is not AuthenticAMD.
+  if (( NONINTERACTIVE )); then
+    warn "NONINTERACTIVE: CPU not AuthenticAMD — continuing (amd-ucode/cmdline still set)"
+  else
+    ui_yesno "CPU is not AuthenticAMD.
 This installer sets amd-ucode + amd_iommu/amd_pstate.
 
 Continue without an AMD CPU (VM rehearsal)?" no warn \
-    || die "aborted — need AuthenticAMD or explicit YES"
+      || die "aborted — need AuthenticAMD or explicit YES"
+  fi
 fi
 ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
 
-# ── 1. choose disk ──────────────────────────────────────────
-while :; do
-  mapfile -t DISKS < <(lsblk -dno PATH,TYPE 2>/dev/null | awk '$2 == "disk" { print $1 }')
-  menu_args=()
-  for d in "${DISKS[@]}"; do
-    [[ -b $d ]] || continue
-    menu_args+=("$d" "$(lsblk -dnro SIZE,MODEL "$d" 2>/dev/null | sed 's/  */ /g')")
-  done
-  menu_args+=("manual" "type a device path")
+# ── answers helpers (T14S_ANSWERS=file; export at end) ───────
+# Known keys only — never eval the answers file.
+ANSWERS_KEYS=(
+  PRESET DESKTOP INSTALL_NERD_FONTS ENROLL_SB ENABLE_SSHD INSTALL_CUPS
+  SKIP_REFLECTOR INSTALL_TLP INSTALL_CLI INSTALL_PODMAN INSTALL_DOCKER
+  INSTALL_VIRT INSTALL_AVAHI INSTALL_WIREGUARD INSTALL_TAILSCALE
+  INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN
+  INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST
+  UFW_SYNCTHING UFW_KDECONNECT POST_HOOK_URL
+  PACMAN_PARALLEL LUKS_WIPE HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME
+  MODE ESP_MB FORMAT_EFI DISK EFI_PART ROOT_PART
+  BTRFS_COMPRESS ZRAM_SIZE REFLECTOR_COUNTRY SKIP_THINKPAD_HW
+)
 
-  DISK="$(ui_menu "Select the target disk. AUTO wipes it entirely." "${menu_args[@]}")" \
-    || die "no disk selected"
-  if [[ $DISK == manual ]]; then
-    DISK="$(ui_input "Target disk (e.g. /dev/nvme0n1)" "")" || die "no disk selected"
+answers_load() {
+  local f=$1 line key val
+  [[ -f $f ]] || return 1
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    [[ $line =~ ^[[:space:]]*$ ]] && continue
+    [[ $line == *=* ]] || continue
+    key=${line%%=*}
+    val=${line#*=}
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    val=${val#$'\r'}
+    case " ${ANSWERS_KEYS[*]} " in
+      *" $key "*) printf -v "$key" '%s' "$val" ;;
+    esac
+  done <"$f"
+  return 0
+}
+
+answers_save() {
+  local f=$1 k val
+  {
+    printf '# t14s-arch-install answers — reload with T14S_ANSWERS=%s\n' "$f"
+    printf '# Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
+    printf '# Passwords NEVER stored here — use T14S_PASS_FILE for unattended secrets.\n'
+    for k in "${ANSWERS_KEYS[@]}"; do
+      if [[ -v $k ]]; then val=${!k}; else val=; fi
+      printf '%s=%s\n' "$k" "$val"
+    done
+  } >"$f"
+  chmod 600 "$f" 2>/dev/null || true
+}
+
+# Secrets file (LUKS/USER/ROOT only). Never written by answers_save.
+# Format: KEY=value lines. Must be mode 0600 (u=rw only).
+secrets_load() {
+  local f=$1 line key val mode
+  [[ -f $f ]] || return 1
+  mode=$(stat -c '%a' "$f" 2>/dev/null || stat -f '%OLp' "$f" 2>/dev/null || echo '')
+  if [[ -n $mode && $mode != 600 && $mode != 0600 ]]; then
+    die "T14S_PASS_FILE must be mode 0600 (got $mode): $f"
   fi
-  [[ -b $DISK ]] || { ui_error "Not a block device: ${DISK:-<empty>}"; continue; }
-  [[ $(disk_type "$DISK") == disk ]] || { ui_error "$DISK is not a whole disk."; continue; }
-  break
-done
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ $line =~ ^[[:space:]]*# ]] && continue
+    [[ $line =~ ^[[:space:]]*$ ]] && continue
+    [[ $line == *=* ]] || continue
+    key=${line%%=*}
+    val=${line#*=}
+    key=${key#"${key%%[![:space:]]*}"}
+    key=${key%"${key##*[![:space:]]}"}
+    val=${val#$'\r'}
+    # Strip one matching pair of surrounding quotes (raw values preferred).
+    if [[ $val == \"*\" && $val == *\" ]]; then
+      val=${val#\"}; val=${val%\"}
+    elif [[ $val == \'*\' && $val == *\' ]]; then
+      val=${val#\'}; val=${val%\'}
+    fi
+    case $key in
+      LUKS_PASS|USER_PASS|ROOT_PASS) printf -v "$key" '%s' "$val" ;;
+    esac
+  done <"$f"
+  return 0
+}
+
+yn_on() { [[ ${1^^} == Y* || $1 == on || $1 == 1 ]]; }
+def_onoff() { yn_on "$1" && printf on || printf off; }
+# Canonicalize flag to Y or N (keeps chroot gates + answers consistent).
+yn_canon() {
+  local -n _yc=$1
+  if yn_on "${_yc:-}"; then _yc=Y; else _yc=N; fi
+}
+
+# True if partition $1 is a child of disk $2 (PKNAME / path prefix).
+part_on_disk() {
+  local part=$1 disk=$2 pk base
+  [[ -b $part && -b $disk ]] || return 1
+  pk=$(lsblk -no PKNAME "$part" 2>/dev/null | head -1)
+  base=${disk##*/}
+  [[ -n $pk && $pk == "$base" ]] && return 0
+  # Fallback: partition path starts with disk path (e.g. /dev/sda1 under /dev/sda).
+  [[ $part == "$disk"* && $part != "$disk" ]] && return 0
+  return 1
+}
+
+if [[ -n $ANSWERS_IN ]]; then
+  if answers_load "$ANSWERS_IN"; then
+    ok "loaded answers from $ANSWERS_IN"
+  else
+    die "T14S_ANSWERS not readable: $ANSWERS_IN"
+  fi
+fi
+if [[ -n $PASS_FILE ]]; then
+  if secrets_load "$PASS_FILE"; then
+    ok "loaded secrets from $PASS_FILE (passwords not saved to answers)"
+  else
+    die "T14S_PASS_FILE not readable: $PASS_FILE"
+  fi
+fi
+
+# ── profile preset (feeds checklist defaults) ───────────────
+: "${PRESET:=gnome}"
+if (( ! NONINTERACTIVE )); then
+  _pg=off; _pd=off; _pm=off
+  case $PRESET in
+    dev) _pd=on ;;
+    minimal) _pm=on ;;
+    *) _pg=on; PRESET=gnome ;;
+  esac
+  PRESET="$(ui_radio "Install profile (sets checklist defaults; you can still change)" \
+    gnome "GNOME laptop — desktop + Nerd Fonts + mDNS" "$_pg" \
+    dev "Dev laptop — GNOME + CLI tools + Podman + Starship" "$_pd" \
+    minimal "Minimal — no desktop, small tool set" "$_pm")" || die "aborted"
+  unset -v _pg _pd _pm
+fi
+case $PRESET in
+  minimal)
+    DESKTOP=${DESKTOP:-N}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-N}
+    INSTALL_CLI=${INSTALL_CLI:-N}; INSTALL_PODMAN=${INSTALL_PODMAN:-N}
+    INSTALL_STARSHIP=${INSTALL_STARSHIP:-N}; INSTALL_AVAHI=${INSTALL_AVAHI:-N}
+    INSTALL_TLP=${INSTALL_TLP:-Y}
+    ;;
+  dev)
+    DESKTOP=${DESKTOP:-Y}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-Y}
+    INSTALL_CLI=${INSTALL_CLI:-Y}; INSTALL_PODMAN=${INSTALL_PODMAN:-Y}
+    INSTALL_STARSHIP=${INSTALL_STARSHIP:-Y}; INSTALL_AVAHI=${INSTALL_AVAHI:-Y}
+    INSTALL_CHROME_HINT=${INSTALL_CHROME_HINT:-Y}
+    INSTALL_TLP=${INSTALL_TLP:-N}
+    ;;
+  *)
+    PRESET=gnome
+    DESKTOP=${DESKTOP:-Y}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-Y}
+    INSTALL_CLI=${INSTALL_CLI:-N}; INSTALL_PODMAN=${INSTALL_PODMAN:-N}
+    INSTALL_STARSHIP=${INSTALL_STARSHIP:-N}; INSTALL_AVAHI=${INSTALL_AVAHI:-Y}
+    INSTALL_TLP=${INSTALL_TLP:-N}
+    ;;
+esac
+# Fill remaining flags with N if unset
+: "${ENROLL_SB:=N}" "${ENABLE_SSHD:=N}" "${INSTALL_CUPS:=N}" "${SKIP_REFLECTOR:=N}"
+: "${INSTALL_DOCKER:=N}" "${INSTALL_VIRT:=N}" "${INSTALL_WIREGUARD:=N}"
+: "${INSTALL_TAILSCALE:=N}" "${INSTALL_CHROME_HINT:=N}" "${INSTALL_FAIL2BAN:=N}"
+: "${INSTALL_THINKFAN:=N}" "${UFW_SYNCTHING:=N}" "${UFW_KDECONNECT:=N}"
+: "${INSTALL_SNAPPER_HOME:=N}" "${INSTALL_LINUX_STABLE:=N}" "${INSTALL_PLYMOUTH:=N}"
+: "${INSTALL_SELFTEST:=Y}"
+: "${PACMAN_PARALLEL:=10}" "${LUKS_WIPE:=none}"
+: "${BTRFS_COMPRESS:=zstd3}" "${ZRAM_SIZE:=half}" "${REFLECTOR_COUNTRY:=}"
+: "${FORMAT_EFI:=1}"
+
+# VM / non-ThinkPad rehearsal: skip BAT thresholds, fprintd, thinkfan notes.
+IS_VM=0
+if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -q 2>/dev/null; then
+  IS_VM=1
+elif grep -qiE 'qemu|kvm|vmware|virtualbox|xen|bochs|microsoft corporation|hyper-v' \
+  /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name 2>/dev/null; then
+  IS_VM=1
+fi
+if [[ -z ${SKIP_THINKPAD_HW:-} ]]; then
+  if (( IS_VM )); then SKIP_THINKPAD_HW=Y; else SKIP_THINKPAD_HW=N; fi
+fi
+if yn_on "$SKIP_THINKPAD_HW"; then
+  warn "SKIP_THINKPAD_HW=Y (VM=${IS_VM}) — skip charge thresholds / fprintd / thinkfan"
+  INSTALL_THINKFAN=N
+fi
+
+# ── 1. choose disk ──────────────────────────────────────────
+if (( NONINTERACTIVE )) && [[ -n ${DISK:-} && -b ${DISK:-} && $(disk_type "$DISK") == disk ]]; then
+  ok "using DISK from answers: $DISK"
+else
+  while :; do
+    mapfile -t DISKS < <(lsblk -dno PATH,TYPE 2>/dev/null | awk '$2 == "disk" { print $1 }')
+    menu_args=()
+    for d in "${DISKS[@]}"; do
+      [[ -b $d ]] || continue
+      menu_args+=("$d" "$(lsblk -dnro SIZE,MODEL "$d" 2>/dev/null | sed 's/  */ /g')")
+    done
+    menu_args+=("manual" "type a device path")
+
+    DISK="$(ui_menu "Select the target disk. AUTO wipes it entirely." "${menu_args[@]}")" \
+      || die "no disk selected"
+    if [[ $DISK == manual ]]; then
+      DISK="$(ui_input "Target disk (e.g. /dev/nvme0n1)" "${DISK:-}")" || die "no disk selected"
+    fi
+    [[ -b $DISK ]] || { ui_error "Not a block device: ${DISK:-<empty>}"; continue; }
+    [[ $(disk_type "$DISK") == disk ]] || { ui_error "$DISK is not a whole disk."; continue; }
+    break
+  done
+fi
+
+# SMART health hint before any wipe (non-fatal if smartmontools/smartctl absent).
+if command -v smartctl >/dev/null 2>&1; then
+  _smart="$(smartctl -H "$DISK" 2>/dev/null | grep -i 'result' | head -1 || true)"
+  if [[ -n $_smart ]]; then
+    ui_info "SMART health for $DISK:
+$_smart
+
+Full report later: smartctl -a $DISK"
+  fi
+  unset -v _smart
+else
+  warn "smartctl not on ISO — pacstrap will not include it unless you add smartmontools"
+fi
 
 # ── 2. partition strategy ───────────────────────────────────
-MODE="$(ui_radio "How should $DISK be partitioned?" \
-  auto "wipe ALL of $DISK: EFI + LUKS root" on \
-  manual "select existing partitions (EFI format or reuse)" off)" || die "aborted"
+if (( ! NONINTERACTIVE )) || [[ -z ${MODE:-} ]]; then
+  _mode_auto=on; _mode_man=off
+  [[ ${MODE:-auto} == manual ]] && { _mode_auto=off; _mode_man=on; }
+  MODE="$(ui_radio "How should $DISK be partitioned?" \
+    auto "wipe ALL of $DISK: EFI + LUKS root" "$_mode_auto" \
+    manual "select existing partitions (EFI format or reuse)" "$_mode_man")" \
+    || die "aborted"
+  unset -v _mode_auto _mode_man
+fi
 
-FORMAT_EFI=1
 if [[ $MODE == auto ]]; then
+  FORMAT_EFI=1
   while :; do
-    ESP_MB="$(ui_radio "EFI system partition size on $DISK" \
-      2048 "2G — recommended for dual UKIs" on \
-      1024 "1G — minimum comfortable" off \
-      4096 "4G — extra multiboot headroom" off)" || die "aborted"
+    if (( NONINTERACTIVE )) && [[ -n ${ESP_MB:-} ]]; then
+      :
+    else
+      _e2=off; _e1=off; _e4=off
+      case ${ESP_MB:-2048} in
+        1024) _e1=on ;;
+        4096) _e4=on ;;
+        *) _e2=on; ESP_MB=2048 ;;
+      esac
+      ESP_MB="$(ui_radio "EFI system partition size on $DISK" \
+        2048 "2G — recommended for dual UKIs" "$_e2" \
+        1024 "1G — minimum comfortable" "$_e1" \
+        4096 "4G — extra multiboot headroom" "$_e4")" || die "aborted"
+      unset -v _e2 _e1 _e4
+    fi
     disk_mb="$(size_mb "$DISK")"
     (( disk_mb > ESP_MB + 8192 )) && break
+    if (( NONINTERACTIVE )); then
+      die "Disk is only ${disk_mb}MB — ESP_MB=${ESP_MB} will not fit with 8GB root"
+    fi
     ui_error "Disk is only ${disk_mb}MB — ${ESP_MB}MB ESP plus an 8GB root will not fit.
 Pick a smaller ESP."
+    ESP_MB=""
   done
 
-  ui_critical "AUTO mode ERASES the ENTIRE disk:
+  if (( NONINTERACTIVE )); then
+    warn "NONINTERACTIVE AUTO: will erase entire $DISK (ESP ${ESP_MB}MB + LUKS root)"
+  else
+    ui_critical "AUTO mode ERASES the ENTIRE disk:
 
 $DISK
 
@@ -868,161 +1191,526 @@ Plan: GPT · ${ESP_MB}MB ESP (FAT32) · remainder LUKS2 + Btrfs
 That includes any Windows / other-OS partitions on it.
 
 $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
-  CONF="$(ui_input "Type the disk path to confirm total wipe" "")" || die "aborted"
-  [[ $CONF == "$DISK" ]] || die "disk confirmation mismatch — aborting"
-  ui_yesno "ERASE $DISK now?" no critical || die "aborted"
+    CONF="$(ui_input "Type the disk path to confirm total wipe" "")" || die "aborted"
+    [[ $CONF == "$DISK" ]] || die "disk confirmation mismatch — aborting"
+    ui_yesno "ERASE $DISK now?" no critical || die "aborted"
+  fi
   # names only; the destructive writes run in the execute phase
   EFI_PART="$(part_of "$DISK" 1)"
   ROOT_PART="$(part_of "$DISK" 2)"
 else
-  ui_info "Manual partitioning on $DISK.
+  # MANUAL: honor EFI_PART/ROOT_PART/FORMAT_EFI from answers under NONINTERACTIVE.
+  if (( NONINTERACTIVE )) \
+    && [[ -n ${EFI_PART:-} && -n ${ROOT_PART:-} ]] \
+    && [[ -b $EFI_PART && -b $ROOT_PART ]]; then
+    [[ $EFI_PART != "$ROOT_PART" ]] || die "EFI_PART and ROOT_PART must differ"
+    part_on_disk "$EFI_PART" "$DISK" \
+      || die "EFI_PART $EFI_PART is not on DISK $DISK"
+    part_on_disk "$ROOT_PART" "$DISK" \
+      || die "ROOT_PART $ROOT_PART is not on DISK $DISK"
+    [[ ${FORMAT_EFI:-1} =~ ^[01]$ ]] || FORMAT_EFI=1
+    efifs="$(part_fs "$EFI_PART")"
+    if (( FORMAT_EFI == 0 )) && [[ $efifs != vfat ]]; then
+      die "FORMAT_EFI=0 but $EFI_PART is '${efifs:-empty}', not FAT32"
+    fi
+    efi_mb="$(size_mb "$EFI_PART")"
+    root_mb="$(size_mb "$ROOT_PART")"
+    if (( efi_mb < 512 )); then
+      die "ESP $EFI_PART is only ${efi_mb}MB (need ≥512; enlarge or pick another)"
+    fi
+    if (( root_mb < 8192 )); then
+      die "ROOT $ROOT_PART is only ${root_mb}MB (need ≥8192)"
+    fi
+    ok "MANUAL partitions from answers: EFI=$EFI_PART ROOT=$ROOT_PART format_efi=$FORMAT_EFI"
+  else
+    ui_info "Manual partitioning on $DISK.
 
 Current layout (select from lists; sizes and existing filesystems shown):
 
 $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
 
-  ROOT_PART="$(pick_part "Select ROOT — ERASED, becomes LUKS2 + Btrfs" "$DISK")" \
-    || die "aborted"
-  while :; do
-    EFIMODE="$(ui_radio "EFI handling for $ROOT_PART" \
-      reuse "keep an existing FAT32 ESP (multiboot-safe)" on \
-      format "format a partition as ESP (destroys its contents)" off)" || die "aborted"
-    if [[ $EFIMODE == reuse ]]; then FORMAT_EFI=0; else FORMAT_EFI=1; fi
+    ROOT_PART="$(pick_part "Select ROOT — ERASED, becomes LUKS2 + Btrfs" "$DISK")" \
+      || die "aborted"
+    while :; do
+      _ef_reuse=on; _ef_fmt=off
+      [[ ${FORMAT_EFI:-1} == 0 ]] || { _ef_reuse=off; _ef_fmt=on; }
+      EFIMODE="$(ui_radio "EFI handling for $ROOT_PART" \
+        reuse "keep an existing FAT32 ESP (multiboot-safe)" "$_ef_reuse" \
+        format "format a partition as ESP (destroys its contents)" "$_ef_fmt")" || die "aborted"
+      unset -v _ef_reuse _ef_fmt
+      if [[ $EFIMODE == reuse ]]; then FORMAT_EFI=0; else FORMAT_EFI=1; fi
 
-    if (( FORMAT_EFI == 0 )) && ! lsblk -prno FSTYPE "$DISK" 2>/dev/null | grep -qx vfat; then
-      ui_warn "No FAT32 ESP exists on $DISK. Pick format mode instead (or cancel to abort)."
-      continue
+      if (( FORMAT_EFI == 0 )) && ! lsblk -prno FSTYPE "$DISK" 2>/dev/null | grep -qx vfat; then
+        ui_warn "No FAT32 ESP exists on $DISK. Pick format mode instead (or cancel to abort)."
+        continue
+      fi
+
+      if (( FORMAT_EFI == 0 )); then
+        EFI_PART="$(pick_part "Select the existing ESP (must be FAT32)" "$DISK" any "$ROOT_PART")" \
+          || die "aborted"
+      else
+        EFI_PART="$(pick_part "Select the partition to FORMAT as ESP" "$DISK" any "$ROOT_PART")" \
+          || die "aborted"
+      fi
+      [[ $EFI_PART != "$ROOT_PART" ]] || { ui_error "EFI and ROOT cannot be the same partition."; continue; }
+
+      efifs="$(part_fs "$EFI_PART")"
+      if (( FORMAT_EFI == 0 )) && [[ $efifs != vfat ]]; then
+        ui_error "$EFI_PART is '${efifs:-empty}', not FAT32 — reuse needs an existing ESP.
+Pick format mode or another partition."
+        continue
+      fi
+      efi_mb="$(size_mb "$EFI_PART")"
+      if (( efi_mb < 512 )); then
+        ui_yesno "ESP $EFI_PART is only ${efi_mb}MB. Dual UKIs will not fit.
+Use it anyway?" no warn || continue
+      elif (( efi_mb < 1024 )); then
+        ui_warn "Note: ESP is ${efi_mb}MB — 1G+ is recommended for dual UKIs."
+      fi
+      break
+    done
+
+    root_mb="$(size_mb "$ROOT_PART")"
+    if (( root_mb < 8192 )); then
+      ui_yesno "ROOT $ROOT_PART is only ${root_mb}MB — 8G+ is recommended.
+Use it anyway?" no warn || die "aborted"
     fi
 
     if (( FORMAT_EFI == 0 )); then
-      EFI_PART="$(pick_part "Select the existing ESP (must be FAT32)" "$DISK" any "$ROOT_PART")" \
-        || die "aborted"
-    else
-      EFI_PART="$(pick_part "Select the partition to FORMAT as ESP" "$DISK" any "$ROOT_PART")" \
-        || die "aborted"
-    fi
-    [[ $EFI_PART != "$ROOT_PART" ]] || { ui_error "EFI and ROOT cannot be the same partition."; continue; }
-
-    efifs="$(part_fs "$EFI_PART")"
-    if (( FORMAT_EFI == 0 )) && [[ $efifs != vfat ]]; then
-      ui_error "$EFI_PART is '${efifs:-empty}', not FAT32 — reuse needs an existing ESP.
-Pick format mode or another partition."
-      continue
-    fi
-    efi_mb="$(size_mb "$EFI_PART")"
-    if (( efi_mb < 512 )); then
-      ui_yesno "ESP $EFI_PART is only ${efi_mb}MB. Dual UKIs will not fit.
-Use it anyway?" no warn || continue
-    elif (( efi_mb < 1024 )); then
-      ui_warn "Note: ESP is ${efi_mb}MB — 1G+ is recommended for dual UKIs."
-    fi
-    break
-  done
-
-  root_mb="$(size_mb "$ROOT_PART")"
-  if (( root_mb < 8192 )); then
-    ui_yesno "ROOT $ROOT_PART is only ${root_mb}MB — 8G+ is recommended.
-Use it anyway?" no warn || die "aborted"
-  fi
-
-  if (( FORMAT_EFI == 0 )); then
-    _m="$(mktemp -d)"
-    _esp_entries=""
-    if mount -o ro "$EFI_PART" "$_m" 2>/dev/null; then
-      _esp_entries="$(find "$_m/EFI" -maxdepth 1 -mindepth 1 2>/dev/null | sed 's,.*/,   ,' || true)"
-      umount "$_m" || true
-    fi
-    rmdir "$_m" 2>/dev/null || true
-    ui_info "Reusing ESP $EFI_PART (FAT, kept).
+      _m="$(mktemp -d)"
+      _esp_entries=""
+      if mount -o ro "$EFI_PART" "$_m" 2>/dev/null; then
+        _esp_entries="$(find "$_m/EFI" -maxdepth 1 -mindepth 1 2>/dev/null | sed 's,.*/,   ,' || true)"
+        umount "$_m" || true
+      fi
+      rmdir "$_m" 2>/dev/null || true
+      ui_info "Reusing ESP $EFI_PART (FAT, kept).
 
 Existing /EFI entries (other OSes stay bootable):
 ${_esp_entries:-   (none)}"
-  elif [[ $efifs == vfat ]]; then
-    ui_critical "DANGER: $EFI_PART is ALREADY FAT — likely a shared ESP.
+    elif [[ $efifs == vfat ]]; then
+      ui_critical "DANGER: $EFI_PART is ALREADY FAT — likely a shared ESP.
 Formatting ERASES other OSes' bootloaders."
-  fi
+    fi
 
-  ui_yesno "Proceed with these partitions?
+    ui_yesno "Proceed with these partitions?
 
   ROOT  $ROOT_PART  $(size_mb "$ROOT_PART")MB  ERASED → LUKS2
   EFI   $EFI_PART  ${efi_mb}MB  $([[ $FORMAT_EFI == 1 ]] && echo FORMATTED || echo REUSED)" no critical \
-    || die "aborted"
+      || die "aborted"
+  fi
 fi
 ok "EFI=$EFI_PART  ROOT=$ROOT_PART  (format_efi=$FORMAT_EFI)"
 
-# ── 3. luks passphrase ──────────────────────────────────────
-while :; do
-  LUKS_PASS="$(ui_password 'LUKS passphrase')" || die "aborted"
-  LUKS_PASS2="$(ui_password 'Repeat LUKS passphrase')" || die "aborted"
-  [[ -n $LUKS_PASS && $LUKS_PASS == "$LUKS_PASS2" ]] && break
-  ui_warn "Empty or mismatched LUKS passphrase — retry."
-done
+# ── 3. luks passphrase + optional mapper wipe (archfi-style) ─
+if (( NONINTERACTIVE )) && [[ -z ${LUKS_PASS:-} ]]; then
+  die "NONINTERACTIVE needs LUKS_PASS in T14S_PASS_FILE"
+fi
+if [[ -n ${LUKS_PASS:-} ]]; then
+  ok "LUKS passphrase from T14S_PASS_FILE"
+else
+  while :; do
+    LUKS_PASS="$(ui_password 'LUKS passphrase')" || die "aborted"
+    LUKS_PASS2="$(ui_password 'Repeat LUKS passphrase')" || die "aborted"
+    [[ -n $LUKS_PASS && $LUKS_PASS == "$LUKS_PASS2" ]] && break
+    ui_warn "Empty or mismatched LUKS passphrase — retry."
+  done
+fi
+if (( NONINTERACTIVE )) && [[ ${LUKS_WIPE:-} =~ ^(none|fast|normal)$ ]]; then
+  :
+else
+  _wn=off; _wf=off; _wo=off
+  case ${LUKS_WIPE:-none} in
+    fast) _wf=on ;;
+    normal) _wo=on ;;
+    *) _wn=on; LUKS_WIPE=none ;;
+  esac
+  LUKS_WIPE="$(ui_radio "Wipe LUKS mapper before mkfs? (paranoia; slow on large disks)" \
+    none "skip — mkfs.btrfs only (default)" "$_wn" \
+    fast "dd zeros bs=64M until full" "$_wf" \
+    normal "dd zeros (slow, thorough)" "$_wo")" || die "aborted"
+  unset -v _wn _wf _wo
+fi
 
 # ── 4. identity ─────────────────────────────────────────────
-HOSTNAME="$(ui_input "Hostname" thinkpad-t14s)" || die "aborted"
+if (( NONINTERACTIVE )) && [[ -n ${HOSTNAME:-} ]]; then
+  :
+else
+  HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-thinkpad-t14s}")" || die "aborted"
+fi
 [[ -n $HOSTNAME ]] || die "hostname cannot be empty"
-TIMEZONE="$(ui_input "Timezone (Region/City)" America/New_York)" || die "aborted"
-LOCALE="$(ui_input "Locale" en_US.UTF-8)" || die "aborted"
-KEYMAP="$(ui_input "Console keymap" us)" || die "aborted"
-while :; do
-  USERNAME="$(ui_input "Username (lowercase POSIX)" "")" || die "aborted"
-  if [[ -z $USERNAME ]]; then
-    ui_warn "username cannot be empty"
-  elif [[ $USERNAME == root ]]; then
-    ui_warn "username cannot be 'root'"
-  elif ! [[ $USERNAME =~ ^[a-z_][a-z0-9_-]*$ ]]; then
-    ui_error "username must match ^[a-z_][a-z0-9_-]*$ (lowercase POSIX)"
-  else
-    break
+
+if (( NONINTERACTIVE )) && [[ -n ${TIMEZONE:-} && ( $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ) ]]; then
+  ok "timezone from answers: $TIMEZONE"
+else
+  while :; do
+    TIMEZONE="$(pick_timezone)" || die "aborted"
+    if [[ $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ]]; then
+      break
+    fi
+    ui_error "Timezone not found (need a zone file): ${TIMEZONE:-<empty>} — pick again."
+  done
+fi
+
+if (( NONINTERACTIVE )) && [[ -n ${LOCALE:-} && $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]]; then
+  ok "locale from answers: $LOCALE"
+else
+  _loc_prev=${LOCALE:-en_US.UTF-8}
+  _lu=off; _lg=off; _ld=off; _lf=off; _ls=off; _lo=off
+  case $_loc_prev in
+    en_GB.UTF-8) _lg=on ;;
+    de_DE.UTF-8) _ld=on ;;
+    fr_FR.UTF-8) _lf=on ;;
+    es_ES.UTF-8) _ls=on ;;
+    en_US.UTF-8) _lu=on ;;
+    *) _lo=on ;;
+  esac
+  LOCALE="$(ui_radio "System locale" \
+    en_US.UTF-8 "English (US)" "$_lu" \
+    en_GB.UTF-8 "English (UK)" "$_lg" \
+    de_DE.UTF-8 "German" "$_ld" \
+    fr_FR.UTF-8 "French" "$_lf" \
+    es_ES.UTF-8 "Spanish" "$_ls" \
+    other "type a locale (e.g. pt_BR.UTF-8)" "$_lo")" || die "aborted"
+  unset -v _lu _lg _ld _lf _ls _lo
+  if [[ $LOCALE == other ]]; then
+    LOCALE="$(ui_input "Locale" "$_loc_prev")" || die "aborted"
   fi
-done
-while :; do
-  USER_PASS="$(ui_password "Password for $USERNAME")" || die "aborted"
-  USER_PASS2="$(ui_password "Repeat password for $USERNAME")" || die "aborted"
-  [[ -n $USER_PASS && $USER_PASS == "$USER_PASS2" ]] && break
-  ui_warn "Empty or mismatched password — retry."
-done
-while :; do
-  ROOT_PASS="$(ui_password 'Root password')" || die "aborted"
-  ROOT_PASS2="$(ui_password 'Repeat root password')" || die "aborted"
-  [[ -n $ROOT_PASS && $ROOT_PASS == "$ROOT_PASS2" ]] && break
-  ui_warn "Empty or mismatched password — retry."
-done
+  unset -v _loc_prev
+fi
+[[ $LOCALE =~ ^[A-Za-z0-9_.@-]+$ ]] || die "invalid locale: ${LOCALE:-<empty>}"
+
+if (( NONINTERACTIVE )) && [[ -n ${KEYMAP:-} ]]; then
+  ok "keymap from answers: $KEYMAP"
+else
+  KEYMAP="$(pick_keymap)" || die "aborted"
+fi
+[[ -n $KEYMAP ]] || die "keymap cannot be empty"
+if (( ! DRYRUN )) && command -v loadkeys >/dev/null 2>&1; then
+  loadkeys "$KEYMAP" 2>/dev/null || warn "loadkeys $KEYMAP failed on live ISO (vconsole still set in target)"
+fi
+
+if (( NONINTERACTIVE )) && [[ -n ${USERNAME:-} && $USERNAME =~ ^[a-z_][a-z0-9_-]*$ && $USERNAME != root ]]; then
+  ok "username from answers: $USERNAME"
+else
+  while :; do
+    USERNAME="$(ui_input "Username (lowercase POSIX)" "${USERNAME:-}")" || die "aborted"
+    if [[ -z $USERNAME ]]; then
+      ui_warn "username cannot be empty"
+    elif [[ $USERNAME == root ]]; then
+      ui_warn "username cannot be 'root'"
+    elif ! [[ $USERNAME =~ ^[a-z_][a-z0-9_-]*$ ]]; then
+      ui_error "username must match ^[a-z_][a-z0-9_-]*$ (lowercase POSIX)"
+    else
+      break
+    fi
+  done
+fi
+if (( NONINTERACTIVE )) && [[ -z ${USER_PASS:-} || -z ${ROOT_PASS:-} ]]; then
+  die "NONINTERACTIVE needs USER_PASS and ROOT_PASS in T14S_PASS_FILE"
+fi
+if [[ -n ${USER_PASS:-} ]]; then
+  ok "user password from T14S_PASS_FILE"
+else
+  while :; do
+    USER_PASS="$(ui_password "Password for $USERNAME")" || die "aborted"
+    USER_PASS2="$(ui_password "Repeat password for $USERNAME")" || die "aborted"
+    [[ -n $USER_PASS && $USER_PASS == "$USER_PASS2" ]] && break
+    ui_warn "Empty or mismatched password — retry."
+  done
+fi
+if [[ -n ${ROOT_PASS:-} ]]; then
+  ok "root password from T14S_PASS_FILE"
+else
+  while :; do
+    ROOT_PASS="$(ui_password 'Root password')" || die "aborted"
+    ROOT_PASS2="$(ui_password 'Repeat root password')" || die "aborted"
+    [[ -n $ROOT_PASS && $ROOT_PASS == "$ROOT_PASS2" ]] && break
+    ui_warn "Empty or mismatched password — retry."
+  done
+fi
 unset -v LUKS_PASS2 USER_PASS2 ROOT_PASS2
 
-# Multi-select extras (Space toggles). Replaces separate yes/no prompts.
-OPTS="$(ui_checklist "Optional extras — Space toggles, Enter confirms" \
-  gnome "Minimal GNOME desktop + Flatpak browsers/VPN" on \
-  sbctl "Enroll Secure Boot keys now (firmware must be in Setup Mode)" off \
-  sshd "Enable SSH server (sshd) after install" off)" || die "aborted"
-DESKTOP=N ENROLL_SB=N ENABLE_SSHD=N
-printf '%s\n' "$OPTS" | grep -qx gnome && DESKTOP=Y || true
-printf '%s\n' "$OPTS" | grep -qx sbctl && ENROLL_SB=Y || true
-printf '%s\n' "$OPTS" | grep -qx sshd && ENABLE_SSHD=Y || true
+if (( ! NONINTERACTIVE )); then
+  _p5=off; _p10=on; _p15=off
+  case $PACMAN_PARALLEL in 5) _p5=on; _p10=off ;; 15) _p15=on; _p10=off ;; esac
+  PACMAN_PARALLEL="$(ui_radio "pacman ParallelDownloads (live + target)" \
+    5 "conservative (slow / flaky links)" "$_p5" \
+    10 "balanced (default)" "$_p10" \
+    15 "aggressive (fast links)" "$_p15")" || die "aborted"
+  unset -v _p5 _p10 _p15
+
+  _bc3=on; _bc1=off; _bc15=off; _bc0=off
+  case $BTRFS_COMPRESS in
+    zstd1) _bc1=on; _bc3=off ;;
+    zstd15) _bc15=on; _bc3=off ;;
+    none) _bc0=on; _bc3=off ;;
+    *) BTRFS_COMPRESS=zstd3 ;;
+  esac
+  BTRFS_COMPRESS="$(ui_radio "Btrfs compression (mount options)" \
+    zstd3 "zstd:3 — default balance" "$_bc3" \
+    zstd1 "zstd:1 — faster, larger" "$_bc1" \
+    zstd15 "zstd:15 — smaller, slower" "$_bc15" \
+    none "no compression" "$_bc0")" || die "aborted"
+  unset -v _bc3 _bc1 _bc15 _bc0
+
+  _zh=on; _zq=off; _z8=off
+  case $ZRAM_SIZE in
+    quarter) _zq=on; _zh=off ;;
+    8192) _z8=on; _zh=off ;;
+    *) ZRAM_SIZE=half ;;
+  esac
+  ZRAM_SIZE="$(ui_radio "zram size" \
+    half "min(RAM/2, 16G) — default" "$_zh" \
+    quarter "min(RAM/4, 8G)" "$_zq" \
+    8192 "fixed 8G" "$_z8")" || die "aborted"
+  unset -v _zh _zq _z8
+fi
+[[ $PACMAN_PARALLEL =~ ^(5|10|15)$ ]] || PACMAN_PARALLEL=10
+[[ $BTRFS_COMPRESS =~ ^(zstd1|zstd3|zstd15|none)$ ]] || BTRFS_COMPRESS=zstd3
+[[ $ZRAM_SIZE =~ ^(half|quarter|8192)$ ]] || ZRAM_SIZE=half
+
+# Split checklists (Core / Tools / Network). Defaults from preset + answers.
+flag_from_opts() {
+  local opts=$1 tag=$2
+  printf '%s\n' "$opts" | grep -qx "$tag"
+}
+
+if (( NONINTERACTIVE )); then
+  EXTRA_PKGS=()
+else
+  OPTS_CORE="$(ui_checklist "Core extras — Space toggles, Enter confirms" \
+    gnome "Minimal GNOME desktop + Flatpak browsers/VPN" "$(def_onoff "$DESKTOP")" \
+    nerd_fonts "Nerd Fonts + Inter/Noto" "$(def_onoff "$INSTALL_NERD_FONTS")" \
+    sbctl "Enroll Secure Boot keys now (Setup Mode)" "$(def_onoff "$ENROLL_SB")" \
+    sshd "Enable SSH server (sshd) after install" "$(def_onoff "$ENABLE_SSHD")" \
+    cups "CUPS printing (cups + cups-pdf + ghostscript)" "$(def_onoff "$INSTALL_CUPS")" \
+    skip_reflector "Skip live reflector; keep ISO mirrorlist" "$(def_onoff "$SKIP_REFLECTOR")" \
+    tlp "TLP power mgmt (console-only; skipped if GNOME)" "$(def_onoff "$INSTALL_TLP")" \
+    thinkfan "Write thinkfan AUR note (not in official repos)" "$(def_onoff "$INSTALL_THINKFAN")" \
+    snapper_home "Snapper config for @home" "$(def_onoff "$INSTALL_SNAPPER_HOME")" \
+    linux_stable "Also install linux (stable) UKI" "$(def_onoff "$INSTALL_LINUX_STABLE")" \
+    plymouth "Plymouth splash (optional)" "$(def_onoff "$INSTALL_PLYMOUTH")" \
+    selftest "Write post-boot BT/audio self-test script" "$(def_onoff "$INSTALL_SELFTEST")" \
+    chrome_hint "Write post-boot Chrome Flatpak helper script" "$(def_onoff "$INSTALL_CHROME_HINT")")" \
+    || die "aborted"
+
+  OPTS_TOOLS="$(ui_checklist "Dev / CLI tools" \
+    cli "ripgrep fd fzf bat eza jq git-delta" "$(def_onoff "$INSTALL_CLI")" \
+    starship "starship prompt (+ wire into user zsh)" "$(def_onoff "$INSTALL_STARSHIP")" \
+    podman "podman + buildah (rootless)" "$(def_onoff "$INSTALL_PODMAN")" \
+    docker "docker + docker-compose (heavier)" "$(def_onoff "$INSTALL_DOCKER")" \
+    virt "libvirt + qemu-desktop + virt-manager" "$(def_onoff "$INSTALL_VIRT")" \
+    htop "htop" off \
+    tmux "tmux" off \
+    rsync "rsync" off \
+    bash_completion "bash-completion" off \
+    wget "wget" off \
+    usbutils "usbutils" off \
+    lsof "lsof" off \
+    dmidecode "dmidecode" off \
+    powertop "powertop" off \
+    mc "mc (midnight commander)" off \
+    traceroute "traceroute" off \
+    bind "bind (dig/nslookup)" off \
+    smartmontools "smartmontools (smartctl)" off)" || die "aborted"
+
+  OPTS_NET="$(ui_checklist "Network / security extras" \
+    avahi "avahi + nss-mdns (.local discovery)" "$(def_onoff "$INSTALL_AVAHI")" \
+    wireguard "wireguard-tools" "$(def_onoff "$INSTALL_WIREGUARD")" \
+    tailscale "tailscale" "$(def_onoff "$INSTALL_TAILSCALE")" \
+    fail2ban "fail2ban (useful with sshd)" "$(def_onoff "$INSTALL_FAIL2BAN")" \
+    ufw_syncthing "UFW allow Syncthing 22000/tcp+udp" "$(def_onoff "$UFW_SYNCTHING")" \
+    ufw_kdeconnect "UFW allow KDE Connect 1714:1764/tcp+udp" "$(def_onoff "$UFW_KDECONNECT")")" \
+    || die "aborted"
+
+  DESKTOP=N; INSTALL_NERD_FONTS=N; ENROLL_SB=N; ENABLE_SSHD=N
+  INSTALL_CUPS=N; SKIP_REFLECTOR=N; INSTALL_TLP=N; INSTALL_THINKFAN=N
+  INSTALL_SNAPPER_HOME=N; INSTALL_LINUX_STABLE=N; INSTALL_PLYMOUTH=N
+  INSTALL_SELFTEST=N; INSTALL_CHROME_HINT=N; INSTALL_CLI=N; INSTALL_STARSHIP=N
+  INSTALL_PODMAN=N; INSTALL_DOCKER=N; INSTALL_VIRT=N
+  INSTALL_AVAHI=N; INSTALL_WIREGUARD=N; INSTALL_TAILSCALE=N
+  INSTALL_FAIL2BAN=N; UFW_SYNCTHING=N; UFW_KDECONNECT=N
+  EXTRA_PKGS=()
+
+  flag_from_opts "$OPTS_CORE" gnome && DESKTOP=Y || true
+  flag_from_opts "$OPTS_CORE" nerd_fonts && INSTALL_NERD_FONTS=Y || true
+  flag_from_opts "$OPTS_CORE" sbctl && ENROLL_SB=Y || true
+  flag_from_opts "$OPTS_CORE" sshd && ENABLE_SSHD=Y || true
+  flag_from_opts "$OPTS_CORE" cups && INSTALL_CUPS=Y || true
+  flag_from_opts "$OPTS_CORE" skip_reflector && SKIP_REFLECTOR=Y || true
+  flag_from_opts "$OPTS_CORE" tlp && INSTALL_TLP=Y || true
+  flag_from_opts "$OPTS_CORE" thinkfan && INSTALL_THINKFAN=Y || true
+  flag_from_opts "$OPTS_CORE" snapper_home && INSTALL_SNAPPER_HOME=Y || true
+  flag_from_opts "$OPTS_CORE" linux_stable && INSTALL_LINUX_STABLE=Y || true
+  flag_from_opts "$OPTS_CORE" plymouth && INSTALL_PLYMOUTH=Y || true
+  flag_from_opts "$OPTS_CORE" selftest && INSTALL_SELFTEST=Y || true
+  flag_from_opts "$OPTS_CORE" chrome_hint && INSTALL_CHROME_HINT=Y || true
+
+  flag_from_opts "$OPTS_TOOLS" cli && INSTALL_CLI=Y || true
+  flag_from_opts "$OPTS_TOOLS" starship && INSTALL_STARSHIP=Y || true
+  flag_from_opts "$OPTS_TOOLS" podman && INSTALL_PODMAN=Y || true
+  flag_from_opts "$OPTS_TOOLS" docker && INSTALL_DOCKER=Y || true
+  flag_from_opts "$OPTS_TOOLS" virt && INSTALL_VIRT=Y || true
+  flag_from_opts "$OPTS_TOOLS" htop && EXTRA_PKGS+=(htop) || true
+  flag_from_opts "$OPTS_TOOLS" tmux && EXTRA_PKGS+=(tmux) || true
+  flag_from_opts "$OPTS_TOOLS" rsync && EXTRA_PKGS+=(rsync) || true
+  flag_from_opts "$OPTS_TOOLS" bash_completion && EXTRA_PKGS+=(bash-completion) || true
+  flag_from_opts "$OPTS_TOOLS" wget && EXTRA_PKGS+=(wget) || true
+  flag_from_opts "$OPTS_TOOLS" usbutils && EXTRA_PKGS+=(usbutils) || true
+  flag_from_opts "$OPTS_TOOLS" lsof && EXTRA_PKGS+=(lsof) || true
+  flag_from_opts "$OPTS_TOOLS" dmidecode && EXTRA_PKGS+=(dmidecode) || true
+  flag_from_opts "$OPTS_TOOLS" powertop && EXTRA_PKGS+=(powertop) || true
+  flag_from_opts "$OPTS_TOOLS" mc && EXTRA_PKGS+=(mc) || true
+  flag_from_opts "$OPTS_TOOLS" traceroute && EXTRA_PKGS+=(traceroute) || true
+  flag_from_opts "$OPTS_TOOLS" bind && EXTRA_PKGS+=(bind) || true
+  flag_from_opts "$OPTS_TOOLS" smartmontools && EXTRA_PKGS+=(smartmontools) || true
+
+  flag_from_opts "$OPTS_NET" avahi && INSTALL_AVAHI=Y || true
+  flag_from_opts "$OPTS_NET" wireguard && INSTALL_WIREGUARD=Y || true
+  flag_from_opts "$OPTS_NET" tailscale && INSTALL_TAILSCALE=Y || true
+  flag_from_opts "$OPTS_NET" fail2ban && INSTALL_FAIL2BAN=Y || true
+  flag_from_opts "$OPTS_NET" ufw_syncthing && UFW_SYNCTHING=Y || true
+  flag_from_opts "$OPTS_NET" ufw_kdeconnect && UFW_KDECONNECT=Y || true
+
+  if [[ $SKIP_REFLECTOR != Y ]]; then
+    REFLECTOR_COUNTRY="$(ui_input "Reflector --country (ISO codes, comma-ok; empty=worldwide)" \
+      "${REFLECTOR_COUNTRY:-}")" || die "aborted"
+  else
+    REFLECTOR_COUNTRY=
+  fi
+
+  # Hook preset: none / env default (T14S_DEFAULT_HOOK_URL) / custom URL.
+  # Never hardcode a private repo URL (smoke forbids linking private trees).
+  _hp_none=on; _hp_env=off; _hp_custom=off
+  if [[ -n ${POST_HOOK_URL:-} ]]; then
+    _hp_none=off; _hp_custom=on
+  elif [[ -n ${T14S_DEFAULT_HOOK_URL:-} ]]; then
+    _hp_none=off; _hp_env=on
+  fi
+  _hook_menu=(none "skip post-install hook" "$_hp_none")
+  if [[ -n ${T14S_DEFAULT_HOOK_URL:-} ]]; then
+    _hook_menu+=(env "use T14S_DEFAULT_HOOK_URL" "$_hp_env")
+  fi
+  _hook_menu+=(custom "type a HTTPS hook URL" "$_hp_custom")
+  HOOK_PRESET="$(ui_radio "Post-install hook (curl|bash as root in new system)" \
+    "${_hook_menu[@]}")" || die "aborted"
+  unset -v _hp_none _hp_env _hp_custom _hook_menu
+  case $HOOK_PRESET in
+    env)
+      POST_HOOK_URL=${T14S_DEFAULT_HOOK_URL:-}
+      [[ -n $POST_HOOK_URL ]] || die "T14S_DEFAULT_HOOK_URL empty"
+      ;;
+    custom)
+      POST_HOOK_URL="$(ui_input "Post-install hook URL (HTTPS; empty=skip)" \
+        "${POST_HOOK_URL:-}")" || die "aborted"
+      ;;
+    *) POST_HOOK_URL= ;;
+  esac
+  unset -v HOOK_PRESET
+fi
+
+# TLP conflicts with GNOME power-profiles-daemon — force off when desktop on.
+if yn_on "$DESKTOP" && yn_on "$INSTALL_TLP"; then
+  warn "TLP skipped — GNOME uses power-profiles-daemon"
+  INSTALL_TLP=N
+fi
+# Re-apply VM/ThinkPad skip after checklist (thinkfan may have been re-enabled).
+if yn_on "$SKIP_THINKPAD_HW"; then
+  INSTALL_THINKFAN=N
+fi
+# Reflector country sanitize (letters/comma/space only).
+if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
+  _rc_re='^[A-Za-z][A-Za-z ,]*$'
+  if ! [[ $REFLECTOR_COUNTRY =~ $_rc_re ]]; then
+    warn "ignoring invalid REFLECTOR_COUNTRY=$REFLECTOR_COUNTRY"
+    REFLECTOR_COUNTRY=
+  fi
+  unset -v _rc_re
+fi
+
+# Optional free-form extras (archfi -cpl spirit). Env T14S_EXTRA_PKGS pre-fills.
+if (( ! NONINTERACTIVE )); then
+  _extra_in="$(ui_input "More pacstrap packages (space-separated, empty=none)" \
+    "${T14S_EXTRA_PKGS:-}")" || die "aborted"
+else
+  _extra_in=${T14S_EXTRA_PKGS:-}
+fi
+if [[ -n ${_extra_in// /} ]]; then
+  # shellcheck disable=SC2206
+  for _p in ${_extra_in}; do
+    if [[ $_p =~ ^[a-z0-9][a-z0-9@._+-]*$ ]]; then
+      EXTRA_PKGS+=("$_p")
+    else
+      ui_warn "Skipping invalid package name: $_p"
+    fi
+  done
+fi
+unset -v _extra_in _p
+
+# Canonicalize boolean flags (answers may use on/1; chroot + saves want Y/N).
+for _flag in DESKTOP INSTALL_NERD_FONTS ENROLL_SB ENABLE_SSHD INSTALL_CUPS \
+  SKIP_REFLECTOR INSTALL_TLP INSTALL_CLI INSTALL_PODMAN INSTALL_DOCKER \
+  INSTALL_VIRT INSTALL_AVAHI INSTALL_WIREGUARD INSTALL_TAILSCALE \
+  INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN \
+  INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST \
+  UFW_SYNCTHING UFW_KDECONNECT SKIP_THINKPAD_HW
+do
+  [[ -v $_flag ]] || printf -v "$_flag" '%s' N
+  yn_canon "$_flag"
+done
+unset -v _flag
 
 # ── final summary ───────────────────────────────────────────
-ui_info "REVIEW — nothing has been written yet.
+_REVIEW="REVIEW — nothing has been written yet.
 
   Disk          $DISK $(size_mb "$DISK")MB ($([[ $MODE == auto ]] && echo "AUTO wipe, ${ESP_MB}MB ESP" || echo manual))
   EFI           $EFI_PART $(size_mb "$EFI_PART")MB ($([[ $FORMAT_EFI == 1 ]] && echo format || echo reuse))
-  ROOT          $ROOT_PART $(size_mb "$ROOT_PART")MB (LUKS2, will be erased)
+  ROOT          $ROOT_PART $(size_mb "$ROOT_PART")MB (LUKS2, wipe=${LUKS_WIPE})
   Hostname      $HOSTNAME
   Timezone      $TIMEZONE
   Locale        $LOCALE
   Keymap        $KEYMAP
   User          $USERNAME
+  Profile       $PRESET
+  Parallel DL   $PACMAN_PARALLEL
+  Btrfs/zram    compress=$BTRFS_COMPRESS zram=$ZRAM_SIZE
+  Reflector     $([[ $SKIP_REFLECTOR == Y ]] && echo skip || echo "refresh${REFLECTOR_COUNTRY:+ ($REFLECTOR_COUNTRY)}")
+  ThinkPad HW   $([[ $SKIP_THINKPAD_HW == Y ]] && echo skip || echo apply)
+  Extra pkgs    $( ((${#EXTRA_PKGS[@]})) && printf '%s ' "${EXTRA_PKGS[@]}" || echo none)
   Desktop       $([[ $DESKTOP == Y ]] && echo 'minimal GNOME' || echo none)
-  Secure Boot   $([[ $ENROLL_SB == Y ]] && echo 'enroll keys now' || echo 'enroll later')
-  SSH (sshd)    $([[ $ENABLE_SSHD == Y ]] && echo enabled || echo disabled)
+  Nerd Fonts    $([[ $INSTALL_NERD_FONTS == Y ]] && echo curated set || echo no)
+  Snapper home  $INSTALL_SNAPPER_HOME
+  linux/plymouth linux=$INSTALL_LINUX_STABLE plymouth=$INSTALL_PLYMOUTH
+  CLI/Podman    cli=$INSTALL_CLI podman=$INSTALL_PODMAN docker=$INSTALL_DOCKER virt=$INSTALL_VIRT
+  Net           avahi=$INSTALL_AVAHI wg=$INSTALL_WIREGUARD tailscale=$INSTALL_TAILSCALE
+  CUPS/TLP/SB   cups=$INSTALL_CUPS tlp=$INSTALL_TLP sb=$ENROLL_SB
+  SSH/f2b       sshd=$ENABLE_SSHD fail2ban=$INSTALL_FAIL2BAN
+  Hook URL      ${POST_HOOK_URL:-none}
+  Pass file     ${PASS_FILE:-none}
 
 Typed passwords are not redisplayed."
+if (( NONINTERACTIVE )); then
+  ok "NONINTERACTIVE: skipping REVIEW/confirm UI"
+  printf '%s\n' "$_REVIEW" | while IFS= read -r _l; do say "$_l"; done
+else
+  ui_info "$_REVIEW"
+  ui_yesno "Start the installation? The partitions above will be ERASED." no critical \
+    || die "aborted by user"
+fi
+unset -v _REVIEW _l
 
-ui_yesno "Start the installation? The partitions above will be ERASED." no critical \
-  || die "aborted by user"
+ANSWERS_OUT="${T14S_ANSWERS_OUT:-/tmp/t14s-answers.env}"
+answers_save "$ANSWERS_OUT" || warn "could not write answers to $ANSWERS_OUT"
+ok "answers saved: $ANSWERS_OUT (reload: T14S_ANSWERS=$ANSWERS_OUT)"
 
 if (( DRYRUN )); then
-  printf 'DRYRUN: EFI=%s ROOT=%s format_efi=%s esp_mb=%s host=%s user=%s desktop=%s sb=%s sshd=%s\n' \
-    "$EFI_PART" "$ROOT_PART" "$FORMAT_EFI" "${ESP_MB:-}" "$HOSTNAME" "$USERNAME" "$DESKTOP" "$ENROLL_SB" "$ENABLE_SSHD"
+  printf 'DRYRUN: preset=%s EFI=%s ROOT=%s host=%s user=%s locale=%s tz=%s keymap=%s wipe=%s parallel=%s desktop=%s nerd=%s cli=%s podman=%s docker=%s virt=%s avahi=%s sshd=%s extra=%s\n' \
+    "$PRESET" "$EFI_PART" "$ROOT_PART" "$HOSTNAME" "$USERNAME" \
+    "$LOCALE" "$TIMEZONE" "$KEYMAP" "$LUKS_WIPE" "$PACMAN_PARALLEL" \
+    "$DESKTOP" "$INSTALL_NERD_FONTS" "$INSTALL_CLI" "$INSTALL_PODMAN" \
+    "$INSTALL_DOCKER" "$INSTALL_VIRT" "$INSTALL_AVAHI" "$ENABLE_SSHD" \
+    "${EXTRA_PKGS[*]:-}"
   exit 0
 fi
 
@@ -1047,6 +1735,29 @@ LUKS_UUID="$(cryptsetup luksUUID "$ROOT_PART")"   # LUKS header UUID (for rd.luk
 [[ -n $LUKS_UUID ]] || die "could not read LUKS UUID from $ROOT_PART"
 ok "LUKS open as /dev/mapper/cryptroot (LUKS UUID=$LUKS_UUID)"
 
+# Optional full-volume wipe before mkfs (archfi normal/fast).
+# dd returns 1 at end-of-device (ENOSPC) — treat as success; other codes die.
+_luks_wipe() {
+  local desc=$1; shift
+  local rc=0
+  set +e
+  run_progress "$desc" "$@"
+  rc=$?
+  set -e
+  (( rc == 0 || rc == 1 )) || die "LUKS wipe failed (dd exit $rc)"
+}
+case $LUKS_WIPE in
+  fast)
+    _luks_wipe "wiping cryptroot (fast dd bs=64M)" \
+      dd if=/dev/zero of=/dev/mapper/cryptroot bs=64M status=progress
+    ;;
+  normal)
+    _luks_wipe "wiping cryptroot (dd)" \
+      dd if=/dev/zero of=/dev/mapper/cryptroot status=progress
+    ;;
+esac
+unset -f _luks_wipe
+
 step "btrfs + subvolumes"
 mkfs.btrfs -f -L archroot /dev/mapper/cryptroot >/dev/null
 mount /dev/mapper/cryptroot /mnt
@@ -1054,7 +1765,12 @@ for sv in @ @home @snapshots @var_log @var_cache @tmp; do btrfs subvolume create
 chattr +C /mnt/@tmp 2>/dev/null || true   # nodatacow inheritance
 umount /mnt
 
-CO="noatime,compress=zstd:3,ssd,space_cache=v2"
+case ${BTRFS_COMPRESS:-zstd3} in
+  zstd1) CO="noatime,compress=zstd:1,ssd,space_cache=v2" ;;
+  zstd15) CO="noatime,compress=zstd:15,ssd,space_cache=v2" ;;
+  none) CO="noatime,ssd,space_cache=v2" ;;
+  *) CO="noatime,compress=zstd:3,ssd,space_cache=v2" ;;
+esac
 mount -o "$CO,subvol=@" /dev/mapper/cryptroot /mnt
 mkdir -p /mnt/{home,.snapshots,var/log,var/cache,tmp,boot}
 mount -o "$CO,subvol=@home"      /dev/mapper/cryptroot /mnt/home
@@ -1097,10 +1813,15 @@ UCODE=amd-ucode
 # short timeouts, hard overall deadline. Write to a temp file first so a killed or
 # empty run never clobbers a usable mirrorlist.
 ML_TMP="$(mktemp)"
-if run_progress "refreshing live mirrors (best-effort, ≤45s)" \
-     timeout 45 reflector --latest 10 --protocol https --sort rate \
-       --threads 5 --connection-timeout 3 --download-timeout 5 \
-       --save "$ML_TMP" \
+_reflector_args=(--latest 10 --protocol https --sort rate
+  --threads 5 --connection-timeout 3 --download-timeout 5 --save "$ML_TMP")
+if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
+  _reflector_args+=(--country "$REFLECTOR_COUNTRY")
+fi
+if [[ $SKIP_REFLECTOR == Y ]]; then
+  ok "reflector skipped by operator — using ISO mirrorlist"
+elif run_progress "refreshing live mirrors (best-effort, ≤45s)" \
+     timeout 45 reflector "${_reflector_args[@]}" \
    && (( $(grep -c '^Server' "$ML_TMP") >= 3 )); then
   cat "$ML_TMP" > /etc/pacman.d/mirrorlist   # keep existing inode/perms (0644)
   ok "mirrorlist refreshed ($(grep -c '^Server' "$ML_TMP") mirrors)"
@@ -1108,6 +1829,7 @@ else
   warn "reflector skipped, timed out, or returned too few mirrors — keeping current mirrorlist"
 fi
 rm -f "$ML_TMP"
+unset -v _reflector_args
 
 # Robust downloads: route pacman through curl with retries + resume and NO
 # low-speed abort, so a slow mirror stalls but doesn't kill the transaction
@@ -1116,6 +1838,12 @@ rm -f "$ML_TMP"
 # would re-run on a partially-populated root and hit 'conflicting files'.
 if ! grep -q '^XferCommand' /etc/pacman.conf; then
   sed -i '/^\[options\]/a XferCommand = /usr/bin/curl -fL -C - -o %o %u --retry 5 --retry-connrefused --connect-timeout 15' /etc/pacman.conf
+fi
+# Live ISO ParallelDownloads (archfi paralleldownloads).
+if grep -q '^#\?ParallelDownloads' /etc/pacman.conf; then
+  sed -i "s/^#\\?ParallelDownloads.*/ParallelDownloads = ${PACMAN_PARALLEL}/" /etc/pacman.conf
+else
+  sed -i "/^\\[options\\]/a ParallelDownloads = ${PACMAN_PARALLEL}" /etc/pacman.conf
 fi
 
 BASE_PKGS=(
@@ -1128,9 +1856,29 @@ BASE_PKGS=(
   reflector pacman-contrib
   mkinitcpio snapper snap-pac zram-generator
   apparmor ufw sbctl efibootmgr
+  xdg-user-dirs
 )
+if yn_on "${INSTALL_LINUX_STABLE:-N}"; then
+  BASE_PKGS+=(linux linux-headers)
+fi
+if yn_on "${INSTALL_PLYMOUTH:-N}"; then
+  BASE_PKGS+=(plymouth)
+fi
+# Deduplicate extras already in the fixed base set.
+if ((${#EXTRA_PKGS[@]})); then
+  _seen=' '
+  for _p in "${BASE_PKGS[@]}"; do _seen+="$_p "; done
+  _extra_clean=()
+  for _p in "${EXTRA_PKGS[@]}"; do
+    [[ $_seen == *" $_p "* ]] && continue
+    _extra_clean+=("$_p")
+    _seen+="$_p "
+  done
+  EXTRA_PKGS=("${_extra_clean[@]}")
+  unset -v _seen _extra_clean _p
+fi
 run_progress "pacstrap base system ($UCODE) — downloading/installing packages" \
-  pacstrap -K /mnt "${BASE_PKGS[@]}"
+  pacstrap -K /mnt "${BASE_PKGS[@]}" ${EXTRA_PKGS[@]+"${EXTRA_PKGS[@]}"}
 
 step "genfstab"
 genfstab -U /mnt >> /mnt/etc/fstab
@@ -1144,12 +1892,21 @@ cat > /mnt/root/chroot-setup.sh <<'CHROOT'
 #!/usr/bin/env bash
 set -euo pipefail
 say(){ printf '\e[1;34m>>\e[0m %s\n' "$*"; }
+yn_on() { [[ ${1^^} == Y* || $1 == on || $1 == 1 ]]; }
 
 # time / locale / keymap
-ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+if [[ $TIMEZONE == UTC ]]; then
+  ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+else
+  ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+fi
 hwclock --systohc
-sed -i "s/^#\(${LOCALE} \)/\1/" /etc/locale.gen
-grep -q "^${LOCALE} " /etc/locale.gen || echo "${LOCALE} UTF-8" >> /etc/locale.gen
+# Escape BRE metacharacters so en_US.UTF-8 dots are literal in sed.
+_loc_esc=$(printf '%s\n' "$LOCALE" | sed 's/[.[\\*^$]/\\&/g')
+sed -i "s/^#${_loc_esc} UTF-8/${LOCALE} UTF-8/" /etc/locale.gen
+grep -qxF "${LOCALE} UTF-8" /etc/locale.gen \
+  || echo "${LOCALE} UTF-8" >> /etc/locale.gen
+unset -v _loc_esc
 locale-gen
 echo "LANG=${LOCALE}" > /etc/locale.conf
 echo "KEYMAP=${KEYMAP}" > /etc/vconsole.conf
@@ -1171,19 +1928,30 @@ echo "${USERNAME}:${USER_PASS}" | chpasswd
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 unset -v USER_PASS ROOT_PASS
 rm -f /root/.t14s-install-secrets
+# initramfs (systemd + sd-encrypt for LUKS; optional plymouth)
+_HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)'
+if yn_on "${INSTALL_PLYMOUTH}"; then
+  _HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt plymouth filesystems fsck)'
+fi
+sed -i "s/^HOOKS=.*/${_HOOKS}/" /etc/mkinitcpio.conf
+unset -v _HOOKS
+grep -q 'sd-encrypt' /etc/mkinitcpio.conf \
+  || { echo "ERROR: mkinitcpio HOOKS missing sd-encrypt after sed" >&2; exit 1; }
 
-# initramfs (systemd + sd-encrypt for LUKS)
-sed -i 's/^HOOKS=.*/HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)/' /etc/mkinitcpio.conf
-
-# kernel cmdline (shared by both UKIs)
+# kernel cmdline (shared by UKIs)
 mkdir -p /etc/kernel
 # AMD Rembrandt: amd_iommu + amd_pstate (no intel_iommu / i915). BIOS Sleep =
 # "Windows and Linux" pairs with mem_sleep_default=s2idle.
-echo "rd.luks.name=${LUKS_UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle apparmor=1 security=apparmor amd_iommu=on amd_pstate=active" > /etc/kernel/cmdline
+_cmdline="rd.luks.name=${LUKS_UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle apparmor=1 security=apparmor amd_iommu=on amd_pstate=active"
+if yn_on "${INSTALL_PLYMOUTH}"; then
+  _cmdline+=" splash"
+fi
+printf '%s\n' "$_cmdline" > /etc/kernel/cmdline
+unset -v _cmdline
 
-# Charge window 70–80. tmpfiles can race before thinkpad_acpi exposes BAT*;
-# oneshot After=multi-user.target waits/retries. No-op on VM without BAT.
+# Charge window 70–80 — skipped on VM / SKIP_THINKPAD_HW.
 mkdir -p /etc/tmpfiles.d /usr/local/lib/t14s
+if ! yn_on "${SKIP_THINKPAD_HW}"; then
 cat > /etc/tmpfiles.d/thinkpad-charge-thresholds.conf <<'EOF'
 # ThinkPad charge thresholds 70–80 (PPD host; no TLP).
 # Best-effort at boot; see thinkpad-charge-thresholds.service if BAT* appears late.
@@ -1232,6 +2000,9 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
 systemctl enable thinkpad-charge-thresholds.service
+else
+  say "SKIP_THINKPAD_HW — charge thresholds not installed"
+fi
 
 # UKI presets: linux-lts (primary) + linux-hardened (fallback)
 # reuse ESP: clear stale UKIs + loader entries before rebuild (multiboot-safe names)
@@ -1263,12 +2034,37 @@ default_options=""
 fallback_uki="/boot/EFI/Linux/arch-linux-hardened-fallback.efi"
 fallback_options="-S autodetect"
 EOF
+if yn_on "${INSTALL_LINUX_STABLE}"; then
+  cat > /etc/mkinitcpio.d/linux.preset <<EOF
+ALL_config="/etc/mkinitcpio.conf"
+ALL_kver="/boot/vmlinuz-linux"
+PRESETS=('default' 'fallback')
+default_uki="/boot/EFI/Linux/arch-linux.efi"
+default_options=""
+fallback_uki="/boot/EFI/Linux/arch-linux-fallback.efi"
+fallback_options="-S autodetect"
+EOF
+fi
 say "building UKIs"
 mkinitcpio -P
 # drop redundant non-UKI initramfs left by the pacstrap install hook — UKI-only
 # presets won't regenerate them, so this frees ESP space permanently.
 rm -f /boot/initramfs-linux-lts.img /boot/initramfs-linux-lts-fallback.img \
-      /boot/initramfs-linux-hardened.img /boot/initramfs-linux-hardened-fallback.img
+      /boot/initramfs-linux-hardened.img /boot/initramfs-linux-hardened-fallback.img \
+      /boot/initramfs-linux.img /boot/initramfs-linux-fallback.img
+# ESP free-space gate after UKI build (dual UKIs need headroom for updates).
+_esp_free_mb="$(df -Pm /boot 2>/dev/null | awk 'NR==2{print $4}')"
+if [[ ${_esp_free_mb:-} =~ ^[0-9]+$ ]]; then
+  if (( _esp_free_mb < 64 )); then
+    echo "ERROR: ESP nearly full after UKI build (${_esp_free_mb}MB free). Enlarge ESP or drop linux-stable." >&2
+    exit 1
+  elif (( _esp_free_mb < 200 )); then
+    say "WARN: ESP low after UKI build (${_esp_free_mb}MB free) — leave room for kernel updates"
+  else
+    say "ESP free after UKI build: ${_esp_free_mb}MB"
+  fi
+fi
+unset -v _esp_free_mb
 
 # bootloader — when reusing a shared/multiboot ESP, back up another OS's fallback
 # loader first. On a freshly-formatted ESP there's nothing to preserve (no clutter).
@@ -1287,14 +2083,20 @@ editor no
 console-mode max
 EOF
 
-# zram (RAM/2 cap 16G — T14s often ships 16–32G soldered LPDDR5)
+# zram size from wizard (half / quarter / fixed 8G)
+case ${ZRAM_SIZE:-half} in
+  quarter) _zram_expr='min(ram / 4, 8192)' ;;
+  8192) _zram_expr='8192' ;;
+  *) _zram_expr='min(ram / 2, 16384)' ;;
+esac
 cat > /etc/systemd/zram-generator.conf <<EOF
 [zram0]
-zram-size = min(ram / 2, 16384)
+zram-size = ${_zram_expr}
 compression-algorithm = zstd
 swap-priority = 100
 fs-type = swap
 EOF
+unset -v _zram_expr
 
 # sysctl hardening
 cat > /etc/sysctl.d/99-security.conf <<EOF
@@ -1322,18 +2124,23 @@ ufw --force enable >/dev/null 2>&1 || true
 grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null || sed -i 's/^ENABLED=.*/ENABLED=yes/' /etc/ufw/ufw.conf 2>/dev/null || true
 
 # reflector mirrors (weekly timer; rate-rating must not serialize on dead mirrors)
-cat > /etc/xdg/reflector/reflector.conf <<EOF
---latest 10
---protocol https
---sort rate
---threads 5
---connection-timeout 3
---download-timeout 5
---save /etc/pacman.d/mirrorlist
-EOF
+{
+  printf '%s\n' '--latest 10' '--protocol https' '--sort rate' '--threads 5'
+  printf '%s\n' '--connection-timeout 3' '--download-timeout 5'
+  printf '%s\n' '--save /etc/pacman.d/mirrorlist'
+  if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
+    printf -- '--country %s\n' "$REFLECTOR_COUNTRY"
+  fi
+} > /etc/xdg/reflector/reflector.conf
 
-# pacman niceties
-sed -i 's/^#Color/Color/; s/^#ParallelDownloads.*/ParallelDownloads = 10/' /etc/pacman.conf
+# pacman niceties (ParallelDownloads chosen in the installer wizard)
+PACMAN_PARALLEL="${PACMAN_PARALLEL:-10}"
+if grep -q '^#\?ParallelDownloads' /etc/pacman.conf; then
+  sed -i "s/^#Color/Color/; s/^#\\?ParallelDownloads.*/ParallelDownloads = ${PACMAN_PARALLEL}/" /etc/pacman.conf
+else
+  sed -i "s/^#Color/Color/" /etc/pacman.conf
+  sed -i "/^\\[options\\]/a ParallelDownloads = ${PACMAN_PARALLEL}" /etc/pacman.conf
+fi
 
 # services
 systemctl enable NetworkManager apparmor ufw bluetooth fstrim.timer reflector.timer \
@@ -1350,26 +2157,40 @@ else
   say "WARN: snapper create-config failed — skipping snapshots (configure post-boot)"
   mkdir -p /.snapshots; mount -a || true
 fi
+if yn_on "${INSTALL_SNAPPER_HOME}"; then
+  say "snapper config for /home"
+  if snapper --no-dbus -c home create-config /home; then
+    say "snapper home config created"
+  else
+    say "WARN: snapper home create-config failed — configure post-boot"
+  fi
+fi
 
 # minimal GNOME (optional)
-if [[ ${DESKTOP^^} != N* ]]; then
+if yn_on "$DESKTOP"; then
   say "installing minimal GNOME + browsers + VPN + software center"
   # sof-firmware+alsa-ucm-conf: Rembrandt audio.
   # mesa+vulkan-radeon+fprintd: Radeon 680M (libva via mesa Provides). No Yoga / iio.
-  # FP (D-Bus-activated — do NOT systemctl enable).
+  # FP (D-Bus-activated — do NOT systemctl enable). Skip fprintd on VM.
   # browsers + proton-vpn: Flatpak. gnome-software: Flatpak software center.
   # Non-fatal: a network hiccup here must not abort an otherwise-bootable base system.
-  if pacman -S --noconfirm --needed --disable-download-timeout \
-    gnome-shell gnome-session gdm gnome-control-center gnome-keyring \
-    gnome-backgrounds nautilus gnome-console gnome-text-editor \
-    gnome-system-monitor gnome-calculator loupe evince gnome-disk-utility \
-    xdg-user-dirs-gtk xdg-desktop-portal xdg-desktop-portal-gnome polkit \
-    flatpak fwupd bolt pipewire pipewire-pulse wireplumber earlyoom \
-    power-profiles-daemon \
-    sof-firmware alsa-ucm-conf fprintd \
-    mesa vulkan-radeon \
+  _gnome_pkgs=(
+    gnome-shell gnome-session gdm gnome-control-center gnome-keyring
+    gnome-backgrounds nautilus gnome-console gnome-text-editor
+    gnome-system-monitor gnome-calculator loupe evince gnome-disk-utility
+    xdg-user-dirs-gtk xdg-desktop-portal xdg-desktop-portal-gnome polkit
+    flatpak fwupd bolt pipewire pipewire-pulse wireplumber earlyoom
+    power-profiles-daemon
+    sof-firmware alsa-ucm-conf
+    mesa vulkan-radeon
     gnome-software
+  )
+  if ! yn_on "${SKIP_THINKPAD_HW}"; then
+    _gnome_pkgs+=(fprintd)
+  fi
+  if pacman -S --noconfirm --needed --disable-download-timeout "${_gnome_pkgs[@]}"
   then
+    unset -v _gnome_pkgs
     systemctl enable gdm bolt.service earlyoom.service power-profiles-daemon
     mkdir -p /etc/gdm
     printf '[daemon]\nWaylandEnable=true\n' > /etc/gdm/custom.conf
@@ -1389,30 +2210,325 @@ if [[ ${DESKTOP^^} != N* ]]; then
       say "WARN: flatpak install failed: ${failed_fp[*]}"
       say "      retry after first boot: flatpak install --system -y flathub <app>"
     fi
+    # archdi-style X11/Wayland keymap from console KEYMAP.
+    # Console map names ≠ XKB layout/variant; remap commons, else best-effort.
+    XKB_LAYOUT= XKB_VARIANT=
+    case $KEYMAP in
+      us|de|fr|es|it|ru) XKB_LAYOUT=$KEYMAP ;;
+      uk) XKB_LAYOUT=gb ;;
+      jp106) XKB_LAYOUT=jp ;;
+      pt-latin1) XKB_LAYOUT=pt ;;
+      br-abnt2) XKB_LAYOUT=br; XKB_VARIANT=abnt2 ;;
+      dvorak) XKB_LAYOUT=us; XKB_VARIANT=dvorak ;;
+      colemak) XKB_LAYOUT=us; XKB_VARIANT=colemak ;;
+      *)
+        XKB_LAYOUT=${KEYMAP%%-*}
+        [[ $KEYMAP == *-* ]] && XKB_VARIANT=${KEYMAP#*-}
+        ;;
+    esac
+    [[ -n $XKB_LAYOUT ]] || XKB_LAYOUT=us
+    write_xkb_conf() {
+      mkdir -p /etc/X11/xorg.conf.d
+      {
+        printf '%s\n' 'Section "InputClass"'
+        printf '%s\n' '        Identifier "system-keyboard"'
+        printf '%s\n' '        MatchIsKeyboard "on"'
+        printf '        Option "XkbLayout" "%s"\n' "$XKB_LAYOUT"
+        [[ -n $XKB_VARIANT ]] \
+          && printf '        Option "XkbVariant" "%s"\n' "$XKB_VARIANT"
+        printf '%s\n' 'EndSection'
+      } > /etc/X11/xorg.conf.d/00-keyboard.conf
+    }
+    if command -v localectl >/dev/null 2>&1 \
+      && localectl set-x11-keymap "$XKB_LAYOUT" "" "$XKB_VARIANT" "" 2>/dev/null; then
+      :
+    else
+      write_xkb_conf
+      say "WARN: localectl set-x11-keymap failed or missing — wrote 00-keyboard.conf ($XKB_LAYOUT${XKB_VARIANT:+|$XKB_VARIANT})"
+    fi
+    unset -f write_xkb_conf
   else
+    unset -v _gnome_pkgs
     say "WARN: GNOME install incomplete (network?) — base system is fine. Finish post-boot:"
     say "      pacman -S gnome-shell gdm && systemctl enable gdm"
   fi
 fi
 
-# Secure Boot: create + sign now; enroll post-reboot (needs firmware Setup Mode)
+# Curated Nerd Fonts + UI fonts (matches HelllGuest install-fonts.sh; not full group).
+if yn_on "${INSTALL_NERD_FONTS}"; then
+  say "installing Nerd Fonts + Inter/Noto"
+  if pacman -S --noconfirm --needed --disable-download-timeout \
+    ttf-jetbrains-mono-nerd ttf-meslo-nerd ttf-firacode-nerd \
+    ttf-cascadia-mono-nerd ttf-cascadia-code-nerd ttf-hack-nerd \
+    ttf-iosevka-nerd ttf-iosevkaterm-nerd ttf-victor-mono-nerd \
+    ttf-ibmplex-mono-nerd ttf-sourcecodepro-nerd ttf-dejavu-nerd \
+    otf-geist-mono-nerd otf-commit-mono-nerd \
+    ttf-nerd-fonts-symbols-common \
+    inter-font noto-fonts noto-fonts-emoji
+  then
+    fc-cache -f >/dev/null 2>&1 || true
+  else
+    say "WARN: font install incomplete — retry post-boot from install-fonts.sh / pacman"
+  fi
+fi
+
+# GNOME dconf defaults (color-scheme; fonts only when Nerd Fonts installed).
+if yn_on "$DESKTOP"; then
+  say "applying GNOME dconf defaults for $USERNAME"
+  sudo -u "$USERNAME" mkdir -p "/home/$USERNAME/.config/dconf"
+  mkdir -p /etc/dconf/db/local.d /etc/dconf/profile
+  printf '%s\n' 'user-db:user' 'system-db:local' > /etc/dconf/profile/user
+  cat > /etc/dconf/db/local.d/00-t14s <<'DCONF'
+[org/gnome/desktop/interface]
+color-scheme='prefer-dark'
+
+[org/gnome/desktop/peripherals/touchpad]
+tap-to-click=true
+natural-scroll=true
+
+[org/gnome/mutter]
+experimental-features=['scale-monitor-framebuffer']
+DCONF
+  if yn_on "${INSTALL_NERD_FONTS}"; then
+    cat >> /etc/dconf/db/local.d/00-t14s <<'DCONF'
+
+[org/gnome/desktop/interface]
+font-name='Inter 11'
+document-font-name='Inter 11'
+monospace-font-name='JetBrainsMono Nerd Font Mono 11'
+
+[org/gnome/Console]
+font='JetBrainsMono Nerd Font Mono 12'
+DCONF
+  fi
+  dconf update 2>/dev/null || true
+fi
+
+# archdi print stack (optional)
+if yn_on "${INSTALL_CUPS}"; then
+  say "installing CUPS printing stack"
+  if pacman -S --noconfirm --needed cups cups-pdf ghostscript; then
+    systemctl enable cups.service
+  else
+    say "WARN: CUPS install failed — retry post-boot: pacman -S cups cups-pdf ghostscript"
+  fi
+fi
+
+# CLI tools
+if yn_on "${INSTALL_CLI}"; then
+  say "installing CLI tools (ripgrep fd fzf bat eza jq git-delta)"
+  pacman -S --noconfirm --needed ripgrep fd fzf bat eza jq git-delta \
+    || say "WARN: CLI tools incomplete"
+fi
+
+# Starship
+if yn_on "${INSTALL_STARSHIP}"; then
+  say "installing starship"
+  if pacman -S --noconfirm --needed starship; then
+    sudo -u "$USERNAME" mkdir -p "/home/$USERNAME/.config"
+    sudo -u "$USERNAME" tee "/home/$USERNAME/.config/starship.toml" >/dev/null <<'S'
+# t14s default — customize after first boot
+add_newline = false
+S
+    if ! grep -q 'starship init zsh' "/home/$USERNAME/.zshrc" 2>/dev/null; then
+      printf '%s\n' 'eval "$(starship init zsh)"' \
+        | sudo -u "$USERNAME" tee -a "/home/$USERNAME/.zshrc" >/dev/null
+    fi
+    chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config" "/home/$USERNAME/.zshrc"
+  else
+    say "WARN: starship install failed"
+  fi
+fi
+
+# Podman
+if yn_on "${INSTALL_PODMAN}"; then
+  say "installing podman + buildah"
+  pacman -S --noconfirm --needed podman buildah \
+    || say "WARN: podman install failed"
+fi
+
+# Docker
+if yn_on "${INSTALL_DOCKER}"; then
+  say "installing docker"
+  if pacman -S --noconfirm --needed docker docker-compose; then
+    systemctl enable docker.service
+    usermod -aG docker "$USERNAME" || true
+  else
+    say "WARN: docker install failed"
+  fi
+fi
+
+# libvirt / qemu
+if yn_on "${INSTALL_VIRT}"; then
+  say "installing libvirt + qemu + virt-manager"
+  if pacman -S --noconfirm --needed libvirt qemu-desktop virt-manager edk2-ovmf dnsmasq; then
+    systemctl enable libvirtd.service
+    usermod -aG libvirt "$USERNAME" || true
+  else
+    say "WARN: virt stack install failed"
+  fi
+fi
+
+# TLP (console-only — desktop path already cleared INSTALL_TLP)
+if yn_on "${INSTALL_TLP}"; then
+  say "installing TLP"
+  if pacman -S --noconfirm --needed tlp tlp-rdw; then
+    systemctl enable tlp.service
+  else
+    say "WARN: TLP install failed"
+  fi
+fi
+
+# thinkfan is AUR-only — leave a post-boot note instead of a failing pacman -S.
+if yn_on "${INSTALL_THINKFAN}"; then
+  cat > /root/t14s-thinkfan.txt <<'TF'
+thinkfan is not in official Arch repos (AUR). After first boot with an AUR helper:
+  paru -S thinkfan
+  # then configure /etc/thinkfan.conf for your T14s and:
+  sudo systemctl enable --now thinkfan
+TF
+  say "wrote /root/t14s-thinkfan.txt (AUR install notes)"
+fi
+
+# Avahi / mDNS
+if yn_on "${INSTALL_AVAHI}"; then
+  say "installing avahi + nss-mdns"
+  if pacman -S --noconfirm --needed avahi nss-mdns; then
+    systemctl enable avahi-daemon.service
+    # Ensure .local resolution (nss-mdns package may not patch hosts line alone).
+    if [[ -f /etc/nsswitch.conf ]] \
+      && ! grep -q 'mdns_minimal' /etc/nsswitch.conf; then
+      sed -i 's/^hosts:.*/hosts: mymachines mdns_minimal [NOTFOUND=return] resolve [!UNAVAIL=return] files myhostname dns/' \
+        /etc/nsswitch.conf \
+        || say "WARN: could not patch nsswitch.conf for mdns_minimal"
+    fi
+  else
+    say "WARN: avahi install failed"
+  fi
+fi
+
+# WireGuard / Tailscale
+if yn_on "${INSTALL_WIREGUARD}"; then
+  pacman -S --noconfirm --needed wireguard-tools \
+    || say "WARN: wireguard-tools failed"
+fi
+if yn_on "${INSTALL_TAILSCALE}"; then
+  if pacman -S --noconfirm --needed tailscale; then
+    systemctl enable tailscaled.service
+  else
+    say "WARN: tailscale failed"
+  fi
+fi
+
+# UFW extras
+if yn_on "${UFW_SYNCTHING}"; then
+  ufw allow 22000/tcp comment 'syncthing' || true
+  ufw allow 22000/udp comment 'syncthing' || true
+fi
+if yn_on "${UFW_KDECONNECT}"; then
+  ufw allow 1714:1764/tcp comment 'kdeconnect' || true
+  ufw allow 1714:1764/udp comment 'kdeconnect' || true
+fi
+
+# Chrome Flatpak helper (post-boot — bwrap often fails in chroot)
+if yn_on "${INSTALL_CHROME_HINT}"; then
+  sudo -u "$USERNAME" tee "/home/$USERNAME/install-chrome-flatpak.sh" >/dev/null <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user -y flathub com.google.Chrome
+SH
+  chmod 755 "/home/$USERNAME/install-chrome-flatpak.sh"
+  chown "$USERNAME:$USERNAME" "/home/$USERNAME/install-chrome-flatpak.sh"
+fi
+
+# XDG user dirs after packages exist (GNOME pulls xdg-user-dirs; base may too).
+if command -v xdg-user-dirs-update >/dev/null 2>&1; then
+  sudo -u "$USERNAME" env HOME="/home/$USERNAME" xdg-user-dirs-update || true
+fi
+
+# Post-boot BT/audio self-test helper (optional).
+if yn_on "${INSTALL_SELFTEST}"; then
+  cat > /usr/local/bin/t14s-selftest <<'ST'
+#!/usr/bin/env bash
+# Quick Rembrandt laptop sanity after first boot.
+set -euo pipefail
+ok=0; bad=0
+check() {
+  local name=$1; shift
+  if "$@"; then echo "OK  $name"; ok=$((ok+1)); else echo "FAIL $name"; bad=$((bad+1)); fi
+}
+check bluetooth systemctl is-active --quiet bluetooth
+check pipewire systemctl --user is-active --quiet pipewire 2>/dev/null \
+  || pactl info >/dev/null 2>&1
+check wifi nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
+  || nmcli networking connectivity 2>/dev/null | grep -qi full
+check apparmor systemctl is-active --quiet apparmor
+check ufw ufw status 2>/dev/null | grep -qi 'Status: active'
+echo "t14s-selftest: $ok ok, $bad fail"
+(( bad == 0 ))
+ST
+  chmod 755 /usr/local/bin/t14s-selftest
+  say "wrote /usr/local/bin/t14s-selftest"
+fi
+
+# Secure Boot: create + sign now; enroll only if verify clean + Setup Mode.
 say "sbctl: create keys + sign"
 sbctl create-keys
 for f in /boot/EFI/Linux/arch-linux-lts.efi /boot/EFI/Linux/arch-linux-lts-fallback.efi \
          /boot/EFI/Linux/arch-linux-hardened.efi /boot/EFI/Linux/arch-linux-hardened-fallback.efi \
+         /boot/EFI/Linux/arch-linux.efi /boot/EFI/Linux/arch-linux-fallback.efi \
          /boot/EFI/systemd/systemd-bootx64.efi /boot/EFI/BOOT/BOOTX64.EFI; do
   [[ -f $f ]] && sbctl sign -s "$f" || true
 done
-if [[ ${ENROLL_SB^^} == Y* ]] && sbctl status 2>/dev/null | grep -qi 'setup mode.*enabled'; then
-  say "enrolling Secure Boot keys (-m)"; sbctl enroll-keys -m || echo "enroll failed — do it post-reboot"
+_sb_ok=0
+if sbctl verify; then
+  _sb_ok=1
+  say "sbctl verify OK"
+else
+  say "WARN: sbctl verify failed — enroll blocked until signatures are fixed"
 fi
-sbctl verify || true
+if yn_on "${ENROLL_SB}"; then
+  if (( _sb_ok )) && sbctl status 2>/dev/null | grep -qi 'setup mode.*enabled'; then
+    say "enrolling Secure Boot keys (-m)"; sbctl enroll-keys -m || echo "enroll failed — do it post-reboot"
+  elif (( ! _sb_ok )); then
+    say "enroll skipped — sbctl verify failed"
+  else
+    say "enroll skipped — Setup Mode not enabled (enroll post-reboot)"
+  fi
+fi
+unset -v _sb_ok
 
-if [[ ${ENABLE_SSHD^^} == Y* ]]; then
+if yn_on "${ENABLE_SSHD}"; then
   say "enabling OpenSSH (sshd + UFW 22/tcp)"
   pacman -S --noconfirm --needed openssh
   systemctl enable sshd
   ufw allow 22/tcp comment 'ssh' || true
+  if yn_on "${INSTALL_FAIL2BAN}"; then
+    say "installing fail2ban"
+    if pacman -S --noconfirm --needed fail2ban; then
+      mkdir -p /etc/fail2ban/jail.d
+      cat > /etc/fail2ban/jail.d/sshd.local <<'FB'
+[sshd]
+enabled = true
+FB
+      systemctl enable fail2ban.service
+    else
+      say "WARN: fail2ban install failed"
+    fi
+  fi
+elif yn_on "${INSTALL_FAIL2BAN}"; then
+  say "fail2ban requested without sshd — installing anyway"
+  if pacman -S --noconfirm --needed fail2ban; then
+    mkdir -p /etc/fail2ban/jail.d
+    cat > /etc/fail2ban/jail.d/sshd.local <<'FB'
+[sshd]
+enabled = true
+FB
+    systemctl enable fail2ban.service
+  else
+    say "WARN: fail2ban install failed"
+  fi
 fi
 CHROOT
 
@@ -1438,6 +2554,20 @@ if ! run_progress "running chroot config (UKIs, users, optional GNOME)" \
     USERNAME="$USERNAME" \
     LUKS_UUID="$LUKS_UUID" DESKTOP="$DESKTOP" ENROLL_SB="$ENROLL_SB" \
     ENABLE_SSHD="$ENABLE_SSHD" FORMAT_EFI="$FORMAT_EFI" \
+    PACMAN_PARALLEL="$PACMAN_PARALLEL" INSTALL_CUPS="$INSTALL_CUPS" \
+    INSTALL_NERD_FONTS="$INSTALL_NERD_FONTS" \
+    INSTALL_CLI="$INSTALL_CLI" INSTALL_STARSHIP="$INSTALL_STARSHIP" \
+    INSTALL_PODMAN="$INSTALL_PODMAN" INSTALL_DOCKER="$INSTALL_DOCKER" \
+    INSTALL_VIRT="$INSTALL_VIRT" INSTALL_TLP="$INSTALL_TLP" \
+    INSTALL_THINKFAN="$INSTALL_THINKFAN" INSTALL_AVAHI="$INSTALL_AVAHI" \
+    INSTALL_WIREGUARD="$INSTALL_WIREGUARD" INSTALL_TAILSCALE="$INSTALL_TAILSCALE" \
+    INSTALL_FAIL2BAN="$INSTALL_FAIL2BAN" INSTALL_CHROME_HINT="$INSTALL_CHROME_HINT" \
+    INSTALL_SNAPPER_HOME="$INSTALL_SNAPPER_HOME" \
+    INSTALL_LINUX_STABLE="$INSTALL_LINUX_STABLE" INSTALL_PLYMOUTH="$INSTALL_PLYMOUTH" \
+    INSTALL_SELFTEST="$INSTALL_SELFTEST" \
+    ZRAM_SIZE="$ZRAM_SIZE" REFLECTOR_COUNTRY="$REFLECTOR_COUNTRY" \
+    SKIP_THINKPAD_HW="$SKIP_THINKPAD_HW" \
+    UFW_SYNCTHING="$UFW_SYNCTHING" UFW_KDECONNECT="$UFW_KDECONNECT" \
     bash /root/chroot-setup.sh
 then
   cleanup_chroot_secrets
@@ -1445,6 +2575,39 @@ then
 fi
 cleanup_chroot_secrets
 ok "chroot config complete"
+
+# Persist answers + optional post-install hook (dotfiles bootstrap URL).
+answers_save /mnt/root/t14s-answers.env || true
+if [[ -n ${POST_HOOK_URL:-} ]]; then
+  # Remote script runs as root in the new system — require explicit consent.
+  _hook_ok=0
+  if (( NONINTERACTIVE )); then
+    if [[ ${T14S_POST_HOOK_I_UNDERSTAND:-0} == 1 ]]; then
+      _hook_ok=1
+    else
+      warn "post-hook skipped in NONINTERACTIVE without T14S_POST_HOOK_I_UNDERSTAND=1"
+    fi
+  else
+    ui_yesno "Run post-install hook as root in the new system?
+
+URL: $POST_HOOK_URL
+
+This downloads and executes remote code. Continue only if you trust the URL." no critical \
+      && _hook_ok=1 || warn "post-install hook skipped by operator"
+  fi
+  if (( _hook_ok )); then
+    step "post-install hook: $POST_HOOK_URL"
+    if run_progress "post-install hook" \
+         env HOOK_URL="$POST_HOOK_URL" \
+         bash -c 'set -o pipefail; curl -fsSL --proto "=https" --tlsv1.2 --max-time 120 "$HOOK_URL" | arch-chroot /mnt bash -s'
+    then
+      ok "post-install hook finished"
+    else
+      warn "post-install hook failed — re-run manually after boot"
+    fi
+  fi
+  unset -v _hook_ok
+fi
 
 # ── 8. finish ───────────────────────────────────────────────
 if [[ ${DESKTOP^^} != N* ]]; then
@@ -1454,11 +2617,26 @@ else
   LOGIN_HINT="Desktop skipped — log in on a virtual console (getty) as ${USERNAME}."
   FLATPAK_HINT="Optional later: pacman -S gnome-shell gdm flatpak && systemctl enable gdm"
 fi
+yn_on "$INSTALL_CHROME_HINT" \
+  && FLATPAK_HINT="Chrome helper: ~${USERNAME}/install-chrome-flatpak.sh (or flatpak install com.google.Chrome)"
+
+if yn_on "$INSTALL_SNAPPER_HOME"; then
+  SNAPPER_HINT="root + home configs enabled"
+else
+  SNAPPER_HINT="root config enabled; add home later: snapper -c home create-config /home"
+fi
+if yn_on "$INSTALL_SELFTEST"; then
+  SELFTEST_HINT="Self-test: /usr/local/bin/t14s-selftest (BT/audio/wifi/apparmor/ufw)"
+else
+  SELFTEST_HINT="Self-test script not installed"
+fi
 
 POST_TXT="T14s install — next steps
 
   Reboot and remove the ISO:   reboot
   Boot menu: Arch Linux (LTS) default, Hardened as fallback.
+  Answers file: /root/t14s-answers.env (T14S_ANSWERS=... to reuse)
+  Passwords: use T14S_PASS_FILE for unattended (never stored in answers)
   Verify after boot: lscpu | grep -i ryzen
                      cat /sys/power/mem_sleep   (expect s2idle bracketed)
   Secure Boot (to enable):
@@ -1467,7 +2645,16 @@ POST_TXT="T14s install — next steps
     3) BIOS -> Secure Boot -> Enabled   (pacman hook auto-resigns on updates)
     multiboot: '-m' keeps Microsoft keys so Windows still boots; other
     unsigned Linux loaders won't boot under SB until you 'sbctl sign' them.
+    If enroll fails: keep SB off, or boot LTS UKI then enroll.
+  Recovery (from Arch ISO):
+    cryptsetup open /dev/<root> cryptroot
+    mount -o subvol=@ /dev/mapper/cryptroot /mnt
+    mount /dev/<esp> /mnt/boot
+    arch-chroot /mnt
+  Snapper: ${SNAPPER_HINT}
+  ${SELFTEST_HINT}
   linux-hardened + Flatpak: userns sysctl already set (99-userns.conf).
+  Fingerprint (fprintd on GNOME): fprintd-enroll
   Hostname: ${HOSTNAME}
   ${LOGIN_HINT}
   Post-boot check: grep -E 'amd_iommu|amd_pstate' /proc/cmdline
