@@ -10,10 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck dialog whiptail
       - name: Smoke
         run: bash tests/smoke.test.sh
       - name: ShellCheck
+        run: shellcheck -S warning -e SC2015,SC2086,SC2162 install.sh
+      - name: TUI backend flags
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq shellcheck
-          shellcheck -S warning -e SC2015,SC2086,SC2162 install.sh
+          dialog --help 2>&1 | grep -q -- '--yes-label'
+          dialog --help 2>&1 | grep -q -- '--ok-label'
+          whiptail --help 2>&1 | grep -q -- '--yes-button'
+          whiptail --help 2>&1 | grep -q -- '--ok-button'

@@ -83,7 +83,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
 | Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
 | Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW check |
-| Clean ESP Arch | Remove old Arch UKIs, `arch*`/`linux-*` loader entries, `EFI/arch` | Reinstall / multiboot hygiene (default on). Kernels/ucode always cleared. Never touches Windows/other OS dirs |
+| Clean ESP Arch | Remove old Arch UKIs, `arch*.conf` entries, `EFI/arch` | Reinstall hygiene (default on). Kernels/ucode always cleared. Skips other vendors’ `EFI/*` dirs; does not delete `linux-*.conf` (may be non-Arch) |
 | Chrome helper | `~/install-chrome-flatpak.sh` | Chrome needs post-boot Flatpak userns |
 
 ### Dev / CLI checklist
@@ -124,7 +124,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Target UFW | deny in / allow out; enabled | Firewall on first boot |
 | Target sudoers | `%wheel` enabled | User admin |
 | ESP | Format or reuse; optional Arch cleanup (`CLEAN_ESP_ARCH`) | Multiboot-safe; frees UKI space |
-| Answers files | `/tmp/t14s-answers.env` + `/root/t14s-answers.env` mode `0600` | Replay installs |
+| Answers files | `/tmp/t14s-answers.env` + `/root/t14s-answers.env` mode `0600` | Replay flags + `EXTRA_PKGS_LIST` (interactive checklist preserves list extras) |
 
 ---
 
@@ -136,7 +136,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Optional LUKS mapper `dd` wipe | Paranoia before `mkfs.btrfs` |
 | AUTO: entire disk GPT rewrite | Single-disk dedicated install |
 | Non-UKI `initramfs-*.img` after UKI build | Free ESP space |
-| Stale Arch UKIs / `loader/entries` / `EFI/arch` (when `CLEAN_ESP_ARCH=Y`) | Avoid dual Arch boots; free ESP |
+| Stale Arch UKIs / `arch*.conf` / `EFI/arch` (when `CLEAN_ESP_ARCH=Y`) | Avoid dual Arch boots; free ESP |
 | `/root/.t14s-install-secrets` + chroot script shredded | Passwords not left on disk |
 | Chrome Flatpak **not** installed in chroot | bwrap userns fails in chroot |
 
@@ -169,17 +169,20 @@ UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whipt
 
 ### Screens
 
-1. Hardware warnings (DMI / AMD)
-2. Profile preset: `gnome` / `dev` / `minimal`
-3. Disk + SMART hint
-4. AUTO / MANUAL partitioning
-5. LUKS passphrase + optional mapper wipe
-6. Hostname, timezone, locale, keymap
-7. User + passwords
+Backtitle: `T14s Arch Installer · N/11 · Phase` (Heads-style progress).
+One question per screen. Long prose folded to ~76 columns.
+
+1. Welcome
+2. Hardware warnings (DMI / AMD)
+3. Profile preset: `gnome` / `dev` / `minimal`
+4. Disk + SMART hint
+5. AUTO / MANUAL partitioning
+6. LUKS passphrase + optional mapper wipe
+7. Identity (host / locale / keymap / user + passwords)
 8. ParallelDownloads, Btrfs compress, zram size
-9. Core / Dev / Network checklists
-10. Reflector country (if not skipped), hook preset, extra packages
-11. REVIEW → confirm → answers saved
+9. Core / Dev / Network checklists, hook, extras
+10. REVIEW → erase confirm (Erase/Abort) → answers saved
+11. Destructive phase (progress / log)
 
 ### Unattended
 
@@ -189,7 +192,7 @@ UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whipt
 
 ```bash
 T14S_NONINTERACTIVE=1 \
-T14S_I_WILL_ERASE=1 \                   # required for AUTO or MANUAL wipe
+T14S_I_WILL_ERASE=1 \                   # required; also y/yes/on
 T14S_ANSWERS=/path/to/t14s-answers.env \
 T14S_PASS_FILE=/path/to/secrets.env \   # must be mode 0600
 T14S_POST_HOOK_I_UNDERSTAND=1 \         # only if POST_HOOK_URL set
@@ -220,30 +223,46 @@ repo URL is hardcoded).
 `FORMAT_EFI` `DISK` `EFI_PART` `ROOT_PART` · `BTRFS_COMPRESS`
 (`zstd1`/`zstd3`/`zstd15`/`none`) · `ZRAM_SIZE` (`half`/`quarter`/`8192`) ·
 `REFLECTOR_COUNTRY` · `SKIP_THINKPAD_HW` (auto `Y` in VMs) ·
-`CLEAN_ESP_ARCH` (default `Y`: remove old Arch UKIs, `arch*.conf` /
-`linux-*.conf` loader entries, and `EFI/arch` dirs; kernels/ucode always
-cleared to avoid pacstrap conflicts; never touches Windows/other OS dirs) ·
-`EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are **never** stored in answers.
-`answers_save` hard-requires mode `0600`.
+`CLEAN_ESP_ARCH` (default `Y`: remove old Arch UKIs, `arch*.conf` entries,
+and `EFI/arch` dirs; kernels/ucode always cleared for pacstrap; ignored /
+forced `Y` when `FORMAT_EFI=1`; does not remove other vendors’ `EFI/*` dirs
+or `linux-*.conf`) · `EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are
+**never** stored in answers. `answers_save` hard-requires mode `0600`.
+`T14S_NONINTERACTIVE` / `T14S_I_WILL_ERASE` accept `1` / `y` / `yes` / `on`.
 
 ### Message severity
 
-Colored message / confirm boxes. Theme base: dark blue screen, cyan chrome,
-yellow focus. Each severity swaps chrome for both backends (**per-severity**
-`DIALOGRC` / `NEWT_COLORS`):
+Colored boxes. Theme base: dark blue screen, cyan chrome, yellow focus. Each
+severity swaps chrome for both backends (**per-severity** `DIALOGRC` /
+`NEWT_COLORS`). Badge text always present (not color-only; Primer CLI a11y).
+
+**`ui_msg` / `ui_info`…`ui_ok` / `die`** (message boxes; OK/Continue only):
 
 | Severity   | When used                                       | Chrome     |
 | ---------- | ----------------------------------------------- | ---------- |
 | **info**   | help, review, reuse notes                       | cyan       |
 | **warn**   | banner, bad input, small ESP/root               | yellow     |
 | **error**  | invalid device/path                             | red        |
-| **critical** | wipe/ESP danger, hard gates, fatal `die`      | red+yellow |
+| **critical** | danger banners; fatal `die` msgbox            | red+yellow |
 | **ok**     | install complete                                | green      |
+
+**`ui_yesno` only** (confirm boxes; not valid for `ui_msg`):
+
+| Severity   | When used                         | Buttons (default No on destructive) |
+| ---------- | --------------------------------- | ----------------------------------- |
+| **critical** | hard gates (DMI, remote hook)   | **Continue** / **Abort**            |
+| **erase**  | disk/partition wipe confirms only | **Erase** / **Abort**               |
+| **warn** / **error** / **info** | size/path confirms     | **Yes** / **No**                    |
+
+Plain fallback tags: `[CRITICAL]` vs `[ERASE]` (and `[WARN]` / `[ERROR]`).
 
 ### Controls
 
-* Arrows move; **Space** toggles; **Enter** accepts; **Tab** to buttons
-* **Esc** / Cancel aborts that menu (and the install if required)
+* Buttons: **Next** / **Abort** on menus; **Continue** on messages;
+  wipe confirms use **Erase** / **Abort**; hard gates use **Continue** /
+  **Abort** (default No)
+* Arrows move; **Space** toggles; **Enter** = Next; **Tab** to buttons
+* **Esc** / Abort quits that menu (and the install if required)
 * Menus offer **[log]** and **[help]**; log: `/tmp/t14s-install.*.log`
 * MANUAL reuse: any partition listed; only FAT32 validates as ESP
 
@@ -307,7 +326,10 @@ That is normal, not installer clutter.
 | ESP root `vmlinuz-linux*`, `initramfs-linux*`, `*-ucode.img` | **Always** (pacstrap safety) | Pre-UKI / bare kernel on ESP |
 | `EFI/Linux/arch*.efi` | `CLEAN_ESP_ARCH=Y` | Prior Arch UKIs |
 | `EFI/arch/` (also `Arch` / `ARCH`) | `CLEAN_ESP_ARCH=Y` | Old GRUB vendor dir |
-| `loader/entries/arch*.conf` / `linux-*.conf` | `CLEAN_ESP_ARCH=Y` | Pre-UKI systemd-boot (**note:** `linux-*.conf` matches any distro using that name on a shared ESP) |
+| `loader/entries/arch*.conf` | `CLEAN_ESP_ARCH=Y` | Pre-UKI Arch systemd-boot entries |
+
+`linux-*.conf` is **not** deleted (could belong to another distro on a shared
+ESP). Remove those by hand if they are yours and stale.
 
 ### Can everything live under one directory?
 
@@ -327,11 +349,13 @@ Windows / other OS vendor dirs are never touched.
 | Always removed (pacstrap safety) | Also removed when `CLEAN_ESP_ARCH=Y` |
 | -------------------------------- | ----------------------------------- |
 | `vmlinuz-linux*`, `initramfs-linux*` | `EFI/Linux/arch*.efi` UKIs |
-| `amd-ucode.img`, `intel-ucode.img` | `loader/entries` matching `arch*.conf` or `linux-*.conf` |
+| `amd-ucode.img`, `intel-ucode.img` | `loader/entries/arch*.conf` |
 | | `EFI/arch`, `EFI/Arch`, `EFI/ARCH` |
 
-Fresh-format ESP already empty (`FORMAT_EFI=1` forces `CLEAN_ESP_ARCH=Y`).
-`CLEAN_ESP_ARCH=N` keeps prior Arch UKIs/entries; kernels/ucode still cleared.
+`FORMAT_EFI=1` (format ESP): cleanup is a no-op; answers still save
+`CLEAN_ESP_ARCH=Y` (flag ignored while formatting).  
+`CLEAN_ESP_ARCH=N` on reuse: keeps prior Arch UKIs/`arch*.conf`; kernels/ucode
+still cleared — boot menu may show dead entries until you delete them.  
 Does not remove `EFI/Microsoft`, `EFI/ubuntu`, or other non-Arch vendor dirs.
 
 ---

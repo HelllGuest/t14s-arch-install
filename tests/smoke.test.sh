@@ -83,7 +83,102 @@ grep -q 'log "View install log" off' "$ROOT/install.sh" || fail "checklist must 
 grep -q -- '--colors' "$ROOT/install.sh" || fail "dialog must enable --colors"
 grep -q 'Message severity' "$ROOT/README.md" || fail "README must document message severity"
 grep -q 'per-severity' "$ROOT/README.md" || fail "README must note per-severity dialogrc/NEWT"
+grep -q 'ui_step' "$ROOT/install.sh" || fail "wizard must set ui_step progress"
+grep -q 'ui_backtitle' "$ROOT/install.sh" || fail "tui must use dynamic backtitle"
+grep -q 'ui_fold' "$ROOT/install.sh" || fail "messages must fold prose"
+grep -q '_tui_btns' "$ROOT/install.sh" || fail "must set Next/Abort/Erase button labels"
+grep -q 'erase_yesno' "$ROOT/install.sh" || fail "wipe confirms need erase_yesno buttons"
+grep -q 'critical_yesno' "$ROOT/install.sh" || fail "hard gates need critical_yesno buttons"
+grep -q 'TUI_STEPS=11' "$ROOT/install.sh" || fail "wizard must declare 11 steps"
+grep -q 'not color-only' "$ROOT/README.md" || fail "README must note a11y severity badges"
+grep -q 'Next' "$ROOT/README.md" || fail "README Controls must document Next button"
+grep -q 'ui_yesno` only' "$ROOT/README.md" \
+  || fail "README must mark erase/critical confirms as ui_yesno-only"
+grep -q 'NONINTERACTIVE: skipping welcome TUI' "$ROOT/install.sh" \
+  || fail "NONINTERACTIVE must skip welcome TUI"
+grep -q 'choose 1-\$i (empty=1)' "$ROOT/install.sh" \
+  || fail "plain menu must not claim Ctrl-C is Esc"
 grep -q -- '--progressbox' "$ROOT/install.sh" || fail "dialog progressbox for live steps"
+# Button roles: wipe uses erase; DMI/hook hard gates use critical (not Erase).
+# Non-spanning parse: one quoted prompt per ui_yesno (no nested " inside prompts).
+python3 - "$ROOT/install.sh" <<'PY' || fail "yesno button roles must separate erase vs continue"
+from pathlib import Path
+import re, sys
+t = Path(sys.argv[1]).read_text()
+# dialog + whiptail labels
+for backend, yes, flag in (
+    ("dialog", "Erase", "--yes-label"),
+    ("dialog", "Continue", "--yes-label"),
+    ("whiptail", "Erase", "--yes-button"),
+    ("whiptail", "Continue", "--yes-button"),
+):
+    role = "erase_yesno" if yes == "Erase" else "critical_yesno"
+    pat = rf"{backend}/{role}\)\s+_btns=\({flag} {yes}"
+    assert re.search(pat, t), f"missing {backend} {role} → {yes}"
+# plain [ERASE] distinct from [CRITICAL]
+assert re.search(r"erase\)\s+tag=.*\[ERASE\]", t), "plain [ERASE] tag"
+assert re.search(r"critical\)\s+tag=.*\[CRITICAL\]", t), "plain [CRITICAL] tag"
+# One call == one "..." prompt; [^"]* allows newlines inside the quotes.
+calls = re.findall(
+    r'ui_yesno\s+"([^"]*)"\s+(yes|no)\s+(critical|erase|warn|error|info)\b',
+    t,
+    flags=re.S,
+)
+erase = [(p, d, s) for p, d, s in calls if s == "erase"]
+critical = [(p, d, s) for p, d, s in calls if s == "critical"]
+assert len(erase) == 3, (
+    f"expected exactly 3 erase confirms, got {len(erase)}: {[p[:40] for p, _, _ in erase]}"
+)
+assert all(d == "no" for _, d, _ in erase), "erase confirms must default no"
+assert any(p.startswith("ERASE $DISK now?") for p, _, _ in erase), "AUTO disk erase"
+assert any("Proceed with these partitions" in p for p, _, _ in erase), "MANUAL proceed erase"
+assert any("will be ERASED" in p for p, _, _ in erase), "final start erase"
+assert any("Wrong machine?" in p for p, _, _ in critical), "DMI must use critical"
+assert any("trust the URL" in p for p, _, _ in critical), "hook must use critical"
+proceed = [c for c in calls if "Proceed with these partitions" in c[0]]
+assert len(proceed) == 1 and proceed[0][2] == "erase", proceed
+# ui_msg must not grow an erase case branch (erase is ui_yesno-only)
+msg = t[t.find("ui_msg()"): t.find("ui_info()")]
+assert not re.search(r"(?m)^\s*erase\)", msg), "ui_msg must not handle erase severity"
+# False-green regression: spanning .*? finder still sees Proceed after severity flip
+poison = t.replace(
+    '" no erase',
+    '" no critical',
+    1,
+)  # flips AUTO disk erase first — real parser must fail count
+poison_calls = re.findall(
+    r'ui_yesno\s+"([^"]*)"\s+(yes|no)\s+(critical|erase|warn|error|info)\b',
+    poison,
+    flags=re.S,
+)
+poison_erase = [c for c in poison_calls if c[2] == "erase"]
+assert len(poison_erase) == 2, "parser must drop flipped AUTO erase"
+# Spanning finder stays green on Proceed→critical + extra erase (document why we avoid it)
+span_src = t.replace(
+    'EFI   $EFI_PART  ${efi_mb}MB  ${_proc_efi_lbl}" no erase',
+    'EFI   $EFI_PART  ${efi_mb}MB  ${_proc_efi_lbl}" no critical',
+    1,
+)
+span_src += '\nui_yesno "extra" no erase\n'
+span_hit = re.findall(r'ui_yesno\s+".*?"\s+no\s+erase\b', span_src, flags=re.S)
+assert any("Proceed with these partitions" in s for s in span_hit), (
+    "expected spanning false-green; if this fails, delete this guard"
+)
+print("ok yesno button roles")
+PY
+# Live backends (when installed): confirm button flags exist on the binary.
+if command -v dialog >/dev/null 2>&1; then
+  dialog --help 2>&1 | grep -q -- '--yes-label' \
+    || fail "installed dialog missing --yes-label"
+  dialog --help 2>&1 | grep -q -- '--ok-label' \
+    || fail "installed dialog missing --ok-label"
+fi
+if command -v whiptail >/dev/null 2>&1; then
+  whiptail --help 2>&1 | grep -q -- '--yes-button' \
+    || fail "installed whiptail missing --yes-button"
+  whiptail --help 2>&1 | grep -q -- '--ok-button' \
+    || fail "installed whiptail missing --ok-button"
+fi
 # progressbox path must not force </dev/tty on the same invocation
 python3 - "$ROOT/install.sh" <<'PY' || fail "progressbox must use TUI_KEEP_STDIN around tui"
 from pathlib import Path
@@ -279,9 +374,35 @@ window = t[i:i+120]
 assert "EXTRA_PKGS=()" not in window, "NI still wipes EXTRA_PKGS"
 print("ok EXTRA_PKGS_LIST replay")
 PY
+# Interactive checklist must re-apply _extras_keep after EXTRA_PKGS=()
+python3 - "$ROOT/install.sh" <<'PY' || fail "interactive must restore EXTRA_PKGS_LIST after checklist"
+from pathlib import Path
+import sys
+t = Path(sys.argv[1]).read_text()
+assert "_extras_keep=(\"${EXTRA_PKGS[@]}\")" in t or '_extras_keep=("${EXTRA_PKGS[@]}")' in t
+assert "EXTRA_PKGS+=(\"${_extras_keep[@]}\")" in t or 'EXTRA_PKGS+=("${_extras_keep[@]}")' in t
+print("ok interactive extras keep")
+PY
+# Loader cleanup must use arch*.conf only (not linux-*.conf)
+python3 - "$ROOT/install.sh" <<'PY' || fail "ESP clean must not delete linux-*.conf"
+from pathlib import Path
+import sys, re
+t = Path(sys.argv[1]).read_text()
+assert "-name 'arch*.conf'" in t or '-name "arch*.conf"' in t
+# No find that deletes linux-*.conf
+assert not re.search(r"-name 'linux-\*\.conf'", t), "linux-*.conf still deleted"
+print("ok arch*.conf only")
+PY
+grep -q '_env_on' "$ROOT/install.sh" || fail "must parse T14S_NONINTERACTIVE / I_WILL_ERASE with yn-style"
+grep -q 'DNS labels only' "$ROOT/install.sh" || fail "must validate HOSTNAME charset"
+grep -q 'yn_on "\$DESKTOP"' "$ROOT/install.sh" || fail "finish path must use yn_on DESKTOP"
+grep -q 'flatpak install --user -y flathub com.google.Chrome' "$ROOT/install.sh" \
+  || fail "finish Chrome hint must use --user"
 grep -q 'flatpak install --user' "$ROOT/README.md" \
   || fail "README Chrome tip must match helper (--user)"
 grep -q 'Setup Mode' "$ROOT/README.md" || fail "README SB enroll must mention Setup Mode"
+grep -q 'FORMAT_EFI=1' "$ROOT/README.md" || fail "README must note CLEAN_ESP ignored when formatting"
+grep -q 'dead entries' "$ROOT/install.sh" || fail "CLEAN_ESP_ARCH=N must warn about dead boot entries"
 grep -q 'sudo -u "\$USERNAME" tee -a' "$ROOT/install.sh" \
   || fail "starship must append zshrc as the user"
 ! grep -q "gtk-theme='Adwaita-dark'" "$ROOT/install.sh" \

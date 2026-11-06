@@ -45,10 +45,13 @@ warn() {
 
 DRYRUN=${T14S_DRYRUN:-0}
 UI=${T14S_UI:-plain}
-NONINTERACTIVE=${T14S_NONINTERACTIVE:-0}
+# Accept 1/y/yes/on (case-insensitive) for env toggles — same spirit as yn_on.
+_env_on() { local v=${1,,}; [[ $v == 1 || $v == y || $v == yes || $v == on ]]; }
+if _env_on "${T14S_NONINTERACTIVE:-0}"; then NONINTERACTIVE=1; else NONINTERACTIVE=0; fi
 ANSWERS_IN=${T14S_ANSWERS:-}
 PASS_FILE=${T14S_PASS_FILE:-}
-WILL_ERASE=${T14S_I_WILL_ERASE:-0}
+if _env_on "${T14S_I_WILL_ERASE:-0}"; then WILL_ERASE=1; else WILL_ERASE=0; fi
+unset -f _env_on
 # Never accept LUKS/user/root passwords from ambient environment (/proc leak).
 # Unattended secrets come only from T14S_PASS_FILE; interactive uses ui_password.
 unset -v LUKS_PASS USER_PASS ROOT_PASS
@@ -68,16 +71,77 @@ TUI_NEWT=""
 TUI_DIALOGRC=""
 TUI_KEEP_STDIN=0
 
+# Wizard progress (Heads / modern installer pattern: step in backtitle).
+TUI_STEPS=11
+TUI_STEP=0
+TUI_STEP_NAME=""
+# Shared key hints (one question per screen; never color-only).
+TUI_HINT_MENU='[log] view install log · [help] tips · Esc/Abort quits'
+TUI_HINT_RADIO='Arrows+Space select · Enter=Next · Esc=Abort · [log]/[help]'
+TUI_HINT_CHECK='Space=toggle · Enter=Next · Esc=Abort · [log]/[help]'
+
 # Screen geometry, clamped so tiny/huge terminals stay usable.
-ROWS=$(tput lines 2>/dev/null) || ROWS=24
-COLS=$(tput cols 2>/dev/null) || COLS=80
-[[ $ROWS =~ ^[0-9]+$ ]] || ROWS=24
-[[ $COLS =~ ^[0-9]+$ ]] || COLS=80
-H=$(( ROWS > 28 ? 22 : ROWS - 6 )); (( H < 12 )) && H=12
-W=$(( COLS > 92 ? 84 : COLS - 8 )); (( W < 56 )) && W=56
-LH=$(( H - 8 )); (( LH < 4 )) && LH=4
-# Compact height for short severity message boxes (still readable).
-MH=$(( H > 16 ? 14 : H )); (( MH < 10 )) && MH=10
+# Refresh on each ui_step (step boundaries only; no SIGWINCH trap).
+ui_geometry() {
+  ROWS=$(tput lines 2>/dev/null) || ROWS=24
+  COLS=$(tput cols 2>/dev/null) || COLS=80
+  [[ $ROWS =~ ^[0-9]+$ ]] || ROWS=24
+  [[ $COLS =~ ^[0-9]+$ ]] || COLS=80
+  H=$(( ROWS > 28 ? 22 : ROWS - 6 )); (( H < 12 )) && H=12
+  W=$(( COLS > 92 ? 84 : COLS - 8 )); (( W < 56 )) && W=56
+  LH=$(( H - 8 )); (( LH < 4 )) && LH=4
+  # Compact height for short severity message boxes (still readable).
+  MH=$(( H > 16 ? 14 : H )); (( MH < 10 )) && MH=10
+  # Fold width for prose (~76 col modern CLI / Primer guideline).
+  FW=$(( W - 4 )); (( FW > 76 )) && FW=76; (( FW < 40 )) && FW=40
+}
+ui_geometry
+
+ui_backtitle() {
+  if (( ${TUI_STEP:-0} > 0 )); then
+    printf '%s · %d/%d · %s' "$APP_TITLE" "$TUI_STEP" "$TUI_STEPS" "$TUI_STEP_NAME"
+  else
+    printf '%s' "$APP_TITLE"
+  fi
+}
+
+# ui_step N NAME — set wizard progress; refresh geometry.
+ui_step() {
+  TUI_STEP=${1:-0}
+  TUI_STEP_NAME=${2:-}
+  ui_geometry
+}
+
+# Fold prose for msg/confirm bodies. Wrap long lines.
+# Callers that must keep trailing newlines: out=$(ui_fold "$t"; printf x); out=${out%x}
+ui_fold() {
+  local text=$1
+  if command -v fold >/dev/null 2>&1; then
+    printf '%s' "$text" | fold -s -w "${FW:-72}"
+  else
+    printf '%s' "$text"
+  fi
+}
+
+# Button labels by backend + role.
+# critical_yesno = Continue/Abort (hard gate, no wipe).
+# erase_yesno = Erase/Abort (disk/partition wipe only).
+# dialog uses --*-label; whiptail uses --*-button.
+_tui_btns() {
+  _btns=()
+  case ${UI:-plain}/$1 in
+    dialog/nav) _btns=(--ok-label Next --cancel-label Abort) ;;
+    whiptail/nav) _btns=(--ok-button Next --cancel-button Abort) ;;
+    dialog/msg) _btns=(--ok-label Continue) ;;
+    whiptail/msg) _btns=(--ok-button Continue) ;;
+    dialog/yesno) _btns=(--yes-label Yes --no-label No) ;;
+    whiptail/yesno) _btns=(--yes-button Yes --no-button No) ;;
+    dialog/critical_yesno) _btns=(--yes-label Continue --no-label Abort) ;;
+    whiptail/critical_yesno) _btns=(--yes-button Continue --no-button Abort) ;;
+    dialog/erase_yesno) _btns=(--yes-label Erase --no-label Abort) ;;
+    whiptail/erase_yesno) _btns=(--yes-button Erase --no-button Abort) ;;
+  esac
+}
 
 # Base palettes: dialogrc (ncurses) + NEWT_COLORS (whiptail).
 # Dark blue screen, cyan accents, yellow focus — readable on ISO VGA + modern TTYs.
@@ -238,27 +302,29 @@ cleanup_ui() {
 # TUI_KEEP_STDIN=1: leave stdin alone (required for --progressbox pipe feed).
 tui() {
   local title=${TUI_TITLE:-$APP_TITLE}
+  local back
+  back=$(ui_backtitle)
   local drc=${TUI_DIALOGRC:-${DIALOG_RC:-${DIALOGRC:-}}}
   case $UI in
     dialog)
       if [[ ${TUI_KEEP_STDIN:-0} == 1 ]]; then
         DIALOGRC="$drc" \
-          dialog --colors --backtitle "$APP_TITLE" --title "$title" \
+          dialog --colors --backtitle "$back" --title "$title" \
           "$@" 3>&1 1>/dev/tty 2>&3
       else
         DIALOGRC="$drc" \
-          dialog --colors --backtitle "$APP_TITLE" --title "$title" \
+          dialog --colors --backtitle "$back" --title "$title" \
           "$@" 3>&1 1>/dev/tty 2>&3 </dev/tty
       fi
       ;;
     whiptail)
       if [[ ${TUI_KEEP_STDIN:-0} == 1 ]]; then
         NEWT_COLORS="${TUI_NEWT:-${NEWT_COLORS:-$NEWT_COLORS_BASE}}" \
-          whiptail --backtitle "$APP_TITLE" --title "$title" \
+          whiptail --backtitle "$back" --title "$title" \
           "$@" 3>&1 1>/dev/tty 2>&3
       else
         NEWT_COLORS="${TUI_NEWT:-${NEWT_COLORS:-$NEWT_COLORS_BASE}}" \
-          whiptail --backtitle "$APP_TITLE" --title "$title" \
+          whiptail --backtitle "$back" --title "$title" \
           "$@" 3>&1 1>/dev/tty 2>&3 </dev/tty
       fi
       ;;
@@ -314,18 +380,21 @@ plain_pause(){ read -rsn1 -p ' [enter] ' </dev/tty || true; printf '\n' >&2; }
 # Severity boxes: ui_info / ui_warn / ui_error / ui_critical / ui_ok (colored chrome).
 # Every menu/radio/checklist can open log or console help via extra tags.
 
-# ui_msg SEVERITY TEXT — colored message box (info|warn|error|critical|ok)
+# ui_msg SEVERITY TEXT — colored message box (info|warn|error|critical|ok).
+# Severity is also a text badge (not color-only; a11y / Primer CLI).
+# Wipe / hard-gate button labels live on ui_yesno only — not on ui_msg.
 ui_msg() {
   local sev=$1; shift
-  local text=$*
-  local title badge plain_c body newt drc h show
+  local text folded title badge plain_c body newt drc h show
+  text=$*
+  folded=$(ui_fold "$text"; printf x); folded=${folded%x}
   # dialog --colors needs literal \Z sequences (single-quoted; $'..' strips \Z).
   case $sev in
     info)
       title="Info — $APP_TITLE"
       badge="INFO"
       plain_c=$cC
-      body='\Zb\Z4[ INFO ]\Zn'$'\n\n'"$text"
+      body='\Zb\Z4[ INFO ]\Zn'$'\n\n'"$folded"
       newt=$NEWT_COLORS_INFO
       drc=${DIALOG_RC_INFO:-$DIALOG_RC}
       ;;
@@ -333,7 +402,7 @@ ui_msg() {
       title="Warning — $APP_TITLE"
       badge="WARN"
       plain_c=$cY
-      body='\Zb\Z3[ WARNING ]\Zn'$'\n\n'"$text"
+      body='\Zb\Z3[ WARNING ]\Zn'$'\n\n'"$folded"
       newt=$NEWT_COLORS_WARN
       drc=${DIALOG_RC_WARN:-$DIALOG_RC}
       ;;
@@ -341,7 +410,7 @@ ui_msg() {
       title="Error — $APP_TITLE"
       badge="ERROR"
       plain_c=$cR
-      body='\Zb\Z1[ ERROR ]\Zn'$'\n\n'"$text"
+      body='\Zb\Z1[ ERROR ]\Zn'$'\n\n'"$folded"
       newt=$NEWT_COLORS_ERROR
       drc=${DIALOG_RC_ERROR:-$DIALOG_RC}
       ;;
@@ -349,7 +418,7 @@ ui_msg() {
       title="CRITICAL — $APP_TITLE"
       badge="CRITICAL"
       plain_c=$cR
-      body='\Zb\Z1\Zr[ CRITICAL ]\Zn'$'\n\n'"$text"
+      body='\Zb\Z1\Zr[ CRITICAL ]\Zn'$'\n\n'"$folded"
       newt=$NEWT_COLORS_CRITICAL
       drc=${DIALOG_RC_CRITICAL:-$DIALOG_RC}
       ;;
@@ -357,7 +426,7 @@ ui_msg() {
       title="Success — $APP_TITLE"
       badge="OK"
       plain_c=$cG
-      body='\Zb\Z2[ OK ]\Zn'$'\n\n'"$text"
+      body='\Zb\Z2[ OK ]\Zn'$'\n\n'"$folded"
       newt=$NEWT_COLORS_OK
       drc=${DIALOG_RC_OK:-$DIALOG_RC}
       ;;
@@ -365,14 +434,14 @@ ui_msg() {
       title="$APP_TITLE"
       badge="NOTE"
       plain_c=$cB
-      body=$text
+      body=$folded
       newt=$NEWT_COLORS_BASE
       drc=$DIALOG_RC
       ;;
   esac
 
   if [[ $UI == plain ]]; then
-    printf '\n%s[%s]%s %s\n' "$plain_c" "$badge" "$c0" "$text" >&2
+    printf '\n%s[%s]%s\n%s\n' "$plain_c" "$badge" "$c0" "$folded" >&2
     plain_pause
     return 0
   fi
@@ -380,14 +449,15 @@ ui_msg() {
   # whiptail has no --colors / \Z; strip dialog markup for body.
   show=$body
   if [[ $UI == whiptail ]]; then
-    show=$(printf '[ %s ]\n\n%s' "$badge" "$text")
+    show=$(printf '[ %s ]\n\n%s' "$badge" "$folded")
   fi
   h=$(msg_height "$show")
 
   TUI_TITLE=$title
   TUI_NEWT=$newt
   TUI_DIALOGRC=$drc
-  tui --msgbox "$show" "$h" "$W" || true
+  _tui_btns msg
+  tui "${_btns[@]}" --msgbox "$show" "$h" "$W" || true
   TUI_TITLE=""
   TUI_NEWT=""
   TUI_DIALOGRC=""
@@ -425,14 +495,16 @@ Path: $LOG"
 ui_console_help() {
   ui_info "Console / log tips
 
+• Backtitle shows Step N/M · phase name
 • Full log:  $LOG
 • Other TTY: Ctrl+Alt+F2 → root →  tail -f $LOG
-• Menus: pick [log] to open the log viewer, [help] for this text
-• Checklist: Space toggles, Enter confirms
-• Radio/menu: arrows + Enter; Esc / Cancel aborts
-• Message boxes: blue=info, yellow=warn, red=error/critical
-• Live steps (pacstrap/chroot): dialog uses a progress box; whiptail/plain
-  stream to the console under a banner"
+• Menus: Next advances, Abort/Esc quits; [log] / [help] always available
+• Checklist: Space toggles, Enter = Next
+• Radio/menu: arrows (+ Space on radio), Enter = Next
+• Severity badge + chrome (not color alone): INFO / WARN / ERROR / CRITICAL / OK
+• Destructive confirms default No
+• Hard gates (DMI/hook): Continue / Abort · wipe confirms: Erase / Abort
+• Live steps (pacstrap/chroot): dialog progress box; whiptail/plain stream to TTY"
 }
 
 # Handle special nav tags; return 0 if consumed (caller should re-prompt).
@@ -446,9 +518,14 @@ ui_nav_special() {
 
 ui_yesno() { # text [default] [severity]
   # default = yes|no (destructive callers pass no).
-  # severity = info|warn|error|critical — colors the confirm chrome.
+  # severity = info|warn|error|critical|erase
+  #   critical → CRITICAL chrome + Continue/Abort (hard gate, not wipe)
+  #   erase    → CRITICAL chrome + Erase/Abort (disk/partition wipe only)
   local text=$1 def=${2:-yes} sev=${3:-}
-  local old_title=$TUI_TITLE old_newt=$TUI_NEWT old_drc=$TUI_DIALOGRC
+  local folded old_title old_newt old_drc btn_role
+  folded=$(ui_fold "$text"; printf x); folded=${folded%x}
+  old_title=$TUI_TITLE old_newt=$TUI_NEWT old_drc=$TUI_DIALOGRC
+  btn_role=yesno
   case $sev in
     warn)
       TUI_TITLE="Confirm — $APP_TITLE"
@@ -464,6 +541,13 @@ ui_yesno() { # text [default] [severity]
       TUI_TITLE="CRITICAL confirm — $APP_TITLE"
       TUI_NEWT=$NEWT_COLORS_CRITICAL
       TUI_DIALOGRC=${DIALOG_RC_CRITICAL:-$DIALOG_RC}
+      btn_role=critical_yesno
+      ;;
+    erase)
+      TUI_TITLE="ERASE confirm — $APP_TITLE"
+      TUI_NEWT=$NEWT_COLORS_CRITICAL
+      TUI_DIALOGRC=${DIALOG_RC_CRITICAL:-$DIALOG_RC}
+      btn_role=erase_yesno
       ;;
     info)
       TUI_TITLE="Confirm — $APP_TITLE"
@@ -478,41 +562,47 @@ ui_yesno() { # text [default] [severity]
       warn) tag="${cY}[WARN]${c0} " ;;
       error) tag="${cR}[ERROR]${c0} " ;;
       critical) tag="${cR}[CRITICAL]${c0} " ;;
+      erase) tag="${cR}[ERASE]${c0} " ;;
     esac
-    read -r -p "$tag$text$suf" v </dev/tty || true
+    printf '%s%s\n' "$tag" "$folded" >&2
+    read -r -p "$suf" v </dev/tty || true
     v=${v:-$def}
     TUI_TITLE=$old_title; TUI_NEWT=$old_newt; TUI_DIALOGRC=$old_drc
     [[ ${v,,} == y* ]]
     return
   fi
   local extra=(); [[ $def == no ]] && extra=(--defaultno)
+  _tui_btns "$btn_role"
   local rc=0
-  tui "${extra[@]}" --yesno "$text" "$(msg_height "$text")" "$W" || rc=$?
+  tui "${extra[@]}" "${_btns[@]}" --yesno "$folded" "$(msg_height "$folded")" "$W" || rc=$?
   TUI_TITLE=$old_title; TUI_NEWT=$old_newt; TUI_DIALOGRC=$old_drc
   return "$rc"
 }
 
 ui_input() { # prompt [default]
   if [[ $UI == plain ]]; then ask "$1: " "${2:-}"; return; fi
-  tui --inputbox "$1" "$H" "$W" "${2:-}"
+  _tui_btns nav
+  tui "${_btns[@]}" --inputbox "$1" 10 "$W" "${2:-}"
 }
 
 ui_password() { # prompt
   if [[ $UI == plain ]]; then ask_secret "$1: "; return; fi
-  tui --passwordbox "$1" "$H" "$W"
+  _tui_btns nav
+  tui "${_btns[@]}" --passwordbox "$1" 10 "$W"
 }
 
 # ui_menu prompt tag description [tag description ...]  -> tag on stdout
-# Always offers log / help as extra entries.
+# Always offers log / help as extra entries. Next advances; Abort/Esc quits.
 ui_menu() {
   local prompt=$1; shift
   local args=("$@") choice
   while true; do
     set -- "${args[@]}"
     if [[ $UI != plain ]]; then
-      choice=$(tui --menu "${prompt}
+      _tui_btns nav
+      choice=$(tui "${_btns[@]}" --menu "${prompt}
 
-[log] view install log · [help] console tips" \
+$TUI_HINT_MENU" \
         "$H" "$W" "$LH" "$@" \
         log "View install log" \
         help "Console / log tips") || return 1
@@ -528,7 +618,7 @@ ui_menu() {
       printf '  %d) View install log [log]\n' "$((i - 1))" >&2
       printf '  %d) Console / log tips [help]\n' "$i" >&2
       local pick
-      read -r -p "choose 1-$i: " pick </dev/tty || true
+      read -r -p "choose 1-$i (empty=1): " pick </dev/tty || true
       [[ -z $pick ]] && pick=1
       if [[ $pick =~ ^[0-9]+$ ]] && (( pick >= 1 && pick <= i )); then
         choice="${tags[pick - 1]}"
@@ -549,9 +639,10 @@ ui_radio() {
   while true; do
     set -- "${args[@]}"
     if [[ $UI != plain ]]; then
-      choice=$(tui --radiolist "${prompt}
+      _tui_btns nav
+      choice=$(tui "${_btns[@]}" --radiolist "${prompt}
 
-[log]/[help] = view log / tips (not a real choice)" \
+$TUI_HINT_RADIO" \
         "$H" "$W" "$LH" "$@" \
         log "View install log" off \
         help "Console / log tips" off) || return 1
@@ -594,19 +685,19 @@ ui_checklist() {
   while true; do
     set -- "${args[@]}"
     if [[ $UI == dialog ]]; then
-      raw=$(tui --separate-output --checklist "${prompt}
+      _tui_btns nav
+      raw=$(tui "${_btns[@]}" --separate-output --checklist "${prompt}
 
-Space=toggle · Enter=OK · Esc/Cancel=abort
-[log]/[help] = view log / tips (not install options)" \
+$TUI_HINT_CHECK" \
         "$H" "$W" "$LH" "$@" \
         log "View install log" off \
         help "Console / log tips" off) || return 1
       out=$raw
     elif [[ $UI == whiptail ]]; then
-      raw=$(tui --checklist "${prompt}
+      _tui_btns nav
+      raw=$(tui "${_btns[@]}" --checklist "${prompt}
 
-Space=toggle · Enter=OK
-[log]/[help] = view log / tips" \
+$TUI_HINT_CHECK" \
         "$H" "$W" "$LH" "$@" \
         log "View install log" off \
         help "Console / log tips" off) || return 1
@@ -614,7 +705,7 @@ Space=toggle · Enter=OK
     else
       local tags=() descs=() states=() t d s i=0
       printf '\n%s\n' "$prompt" >&2
-      printf '(numbers toggle; empty line=confirm; L=log H=help)\n' >&2
+      printf '(numbers toggle; empty line=Next; L=log H=help)\n' >&2
       while (( $# >= 3 )); do
         t=$1 d=$2 s=$3; shift 3
         tags+=("$t"); descs+=("$d"); states+=("$s"); i=$((i + 1))
@@ -626,7 +717,7 @@ Space=toggle · Enter=OK
             "$([[ ${states[j]} == on ]] && echo x || echo ' ')" "${descs[j]}" >&2
         done
         local pick
-        read -r -p "toggle # / Enter=done / L=log / H=help: " pick </dev/tty || true
+        read -r -p "toggle # / Enter=Next / L=log / H=help: " pick </dev/tty || true
         case "${pick,,}" in
           '') break ;;
           l) ui_view_log; continue ;;
@@ -737,6 +828,7 @@ bootstrap_ui() {
   if [[ $UI == dialog || $UI == whiptail ]]; then
     write_dialogrc
   fi
+  ui_geometry
   return 0
 }
 
@@ -895,16 +987,23 @@ if (( ! DRYRUN )); then
   cryptsetup close cryptroot 2>/dev/null || true
 fi
 
-ui_warn "T14s Gen 3 AMD ARCH INSTALLER — DESTROYS DATA ON DISK
+if (( NONINTERACTIVE )); then
+  warn "NONINTERACTIVE: skipping welcome TUI (answers + T14S_I_WILL_ERASE gate wipe)"
+else
+  ui_step 1 Welcome
+  ui_warn "T14s Gen 3 AMD ARCH INSTALLER — DESTROYS DATA ON DISK
 
 Machine: ThinkPad T14s Gen 3 AMD (Type 21CQ/21CR) — Rembrandt + amdgpu
 Stack:   LUKS2 + Btrfs(+@tmp) + linux-lts/hardened + UKI + systemd-boot
          + minimal GNOME + zram + AppArmor + UFW + Snapper + Secure Boot
 
-All answers are read from /dev/tty. Nothing changes until the final confirm.
-Wipe / erase confirms later use CRITICAL chrome."
+One question per screen. Backtitle shows Step N/11.
+All answers from /dev/tty. Nothing written until the final Erase confirm.
+Destructive confirms default No. Wipe = Erase/Abort; hard gates = Continue/Abort."
+fi
 
 # Soft DMI check — Gen 3 AMD types only (21CQ/21CR). Anchored to avoid substring noise.
+ui_step 2 Hardware
 _dmi="$(cat /sys/class/dmi/id/product_family /sys/class/dmi/id/product_version \
           /sys/class/dmi/id/product_name /sys/class/dmi/id/product_sku 2>/dev/null \
         | tr '\n' ' ')"
@@ -960,6 +1059,12 @@ answers_load() {
     key=${key#"${key%%[![:space:]]*}"}
     key=${key%"${key##*[![:space:]]}"}
     val=${val#$'\r'}
+    # Strip one matching pair of surrounding quotes (hand-edited answers).
+    if [[ $val == \"*\" ]]; then
+      val=${val#\"}; val=${val%\"}
+    elif [[ $val == \'*\' ]]; then
+      val=${val#\'}; val=${val%\'}
+    fi
     case " ${ANSWERS_KEYS[*]} " in
       *" $key "*) printf -v "$key" '%s' "$val" ;;
     esac
@@ -1076,6 +1181,7 @@ fi
 
 # ── profile preset (feeds checklist defaults) ───────────────
 : "${PRESET:=gnome}"
+ui_step 3 Profile
 if (( ! NONINTERACTIVE )); then
   _pg=off; _pd=off; _pm=off
   case $PRESET in
@@ -1124,8 +1230,9 @@ esac
 
 # Remove prior Arch boot files under an ESP mount root ($1 = /mnt/boot or /boot).
 # Always drops kernels/ucode that conflict with pacstrap. When CLEAN_ESP_ARCH=Y
-# also removes Arch UKIs, Arch loader entries, and EFI/arch vendor dirs.
-# Never touches Windows / other-OS vendor directories.
+# also removes Arch UKIs, Arch-named loader entries (arch*.conf only), and
+# EFI/arch vendor dirs. Does not delete linux-*.conf (may belong to other
+# distros on a shared ESP). Never removes EFI/Microsoft or other vendor dirs.
 clean_esp_arch_files() {
   local root=${1%/}
   [[ -d $root ]] || return 0
@@ -1136,7 +1243,7 @@ clean_esp_arch_files() {
           "$root"/EFI/Linux/arch*.efi 2>/dev/null || true
     if [[ -d $root/loader/entries ]]; then
       find "$root/loader/entries" -maxdepth 1 -type f \
-        \( -name 'arch*.conf' -o -name 'linux-*.conf' \) -delete 2>/dev/null || true
+        -name 'arch*.conf' -delete 2>/dev/null || true
     fi
     # Legacy GRUB/refind-style Arch vendor dirs (case variants).
     rm -rf "$root"/EFI/arch "$root"/EFI/Arch "$root"/EFI/ARCH 2>/dev/null || true
@@ -1171,6 +1278,7 @@ if yn_on "$SKIP_THINKPAD_HW"; then
 fi
 
 # ── 1. choose disk ──────────────────────────────────────────
+ui_step 4 Disk
 if (( NONINTERACTIVE )); then
   [[ -n ${DISK:-} && -b ${DISK:-} && $(disk_type "$DISK") == disk ]] \
     || die "NONINTERACTIVE needs DISK=<whole-disk block device> in answers"
@@ -1211,6 +1319,7 @@ else
 fi
 
 # ── 2. partition strategy ───────────────────────────────────
+ui_step 5 Partition
 if (( NONINTERACTIVE )); then
   [[ ${MODE:-} == auto || ${MODE:-} == manual ]] \
     || die "NONINTERACTIVE needs MODE=auto|manual in answers"
@@ -1225,8 +1334,8 @@ else
 fi
 
 require_ni_erase() {
-  [[ ${WILL_ERASE} == 1 ]] \
-    || die "NONINTERACTIVE destructive install needs T14S_I_WILL_ERASE=1"
+  (( WILL_ERASE == 1 )) \
+    || die "NONINTERACTIVE destructive install needs T14S_I_WILL_ERASE=1 (or y/yes/on)"
 }
 
 if [[ $MODE == auto ]]; then
@@ -1273,7 +1382,7 @@ That includes any Windows / other-OS partitions on it.
 $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
     CONF="$(ui_input "Type the disk path to confirm total wipe" "")" || die "aborted"
     [[ $CONF == "$DISK" ]] || die "disk confirmation mismatch — aborting"
-    ui_yesno "ERASE $DISK now?" no critical || die "aborted"
+    ui_yesno "ERASE $DISK now?" no erase || die "aborted"
   fi
   # names only; the destructive writes run in the execute phase
   EFI_PART="$(part_of "$DISK" 1)"
@@ -1374,16 +1483,21 @@ ${_esp_entries:-   (none)}"
 Formatting ERASES other OSes' bootloaders."
     fi
 
+    # Precompute sizes/labels so the prompt has no nested quotes (smoke parses it).
+    _proc_root_mb="$(size_mb "$ROOT_PART")"
+    _proc_efi_lbl=$([[ $FORMAT_EFI == 1 ]] && echo FORMATTED || echo REUSED)
     ui_yesno "Proceed with these partitions?
 
-  ROOT  $ROOT_PART  $(size_mb "$ROOT_PART")MB  ERASED → LUKS2
-  EFI   $EFI_PART  ${efi_mb}MB  $([[ $FORMAT_EFI == 1 ]] && echo FORMATTED || echo REUSED)" no critical \
+  ROOT  $ROOT_PART  ${_proc_root_mb}MB  ERASED → LUKS2
+  EFI   $EFI_PART  ${efi_mb}MB  ${_proc_efi_lbl}" no erase \
       || die "aborted"
+    unset -v _proc_root_mb _proc_efi_lbl
   fi
 fi
 ok "EFI=$EFI_PART  ROOT=$ROOT_PART  (format_efi=$FORMAT_EFI)"
 
 # ── 3. luks passphrase + optional mapper wipe (archfi-style) ─
+ui_step 6 LUKS
 if (( SECRETS_FROM_FILE )); then
   ok "LUKS passphrase from T14S_PASS_FILE"
 else
@@ -1413,12 +1527,16 @@ else
 fi
 
 # ── 4. identity ─────────────────────────────────────────────
+ui_step 7 Identity
 if (( NONINTERACTIVE )); then
   [[ -n ${HOSTNAME:-} ]] || die "NONINTERACTIVE needs HOSTNAME in answers"
 else
   HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-thinkpad-t14s}")" || die "aborted"
 fi
 [[ -n $HOSTNAME ]] || die "hostname cannot be empty"
+# Single label or dotted FQDN; no leading/trailing hyphen or dot.
+[[ $HOSTNAME =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]] \
+  || die "invalid hostname (DNS labels only): ${HOSTNAME}"
 
 if (( NONINTERACTIVE )); then
   [[ -n ${TIMEZONE:-} && ( $TIMEZONE == UTC || -f /usr/share/zoneinfo/$TIMEZONE ) ]] \
@@ -1471,6 +1589,14 @@ else
   KEYMAP="$(pick_keymap)" || die "aborted"
 fi
 [[ -n $KEYMAP ]] || die "keymap cannot be empty"
+[[ $KEYMAP =~ ^[a-zA-Z0-9][a-zA-Z0-9._+-]*$ ]] \
+  || die "invalid KEYMAP name: ${KEYMAP}"
+if (( NONINTERACTIVE )) && [[ -d /usr/share/kbd/keymaps || -d /usr/share/keymaps ]]; then
+  if ! find /usr/share/kbd/keymaps /usr/share/keymaps -type f \
+       \( -name "${KEYMAP}.map" -o -name "${KEYMAP}.map.gz" \) 2>/dev/null | grep -q .; then
+    warn "KEYMAP=$KEYMAP not found under /usr/share/kbd/keymaps (continuing; vconsole may fail)"
+  fi
+fi
 if (( ! DRYRUN )) && command -v loadkeys >/dev/null 2>&1; then
   loadkeys "$KEYMAP" 2>/dev/null || warn "loadkeys $KEYMAP failed on live ISO (vconsole still set in target)"
 fi
@@ -1511,6 +1637,7 @@ else
 fi
 unset -v LUKS_PASS2 USER_PASS2 ROOT_PASS2
 
+ui_step 8 Downloads
 if (( NONINTERACTIVE )); then
   [[ $PACMAN_PARALLEL =~ ^(5|10|15)$ ]] \
     || die "NONINTERACTIVE needs PACMAN_PARALLEL=5|10|15"
@@ -1563,11 +1690,12 @@ flag_from_opts() {
   printf '%s\n' "$opts" | grep -qx "$tag"
 }
 
+ui_step 9 Extras
 if (( NONINTERACTIVE )); then
   # Keep EXTRA_PKGS already filled from EXTRA_PKGS_LIST (answers replay).
   :
 else
-  OPTS_CORE="$(ui_checklist "Core extras — Space toggles, Enter confirms" \
+  OPTS_CORE="$(ui_checklist "Core extras — Space toggles, Enter = Next" \
     gnome "Minimal GNOME desktop + Flatpak browsers/VPN" "$(def_onoff "$DESKTOP")" \
     nerd_fonts "Nerd Fonts + Inter/Noto" "$(def_onoff "$INSTALL_NERD_FONTS")" \
     sbctl "Enroll Secure Boot keys now (Setup Mode)" "$(def_onoff "$ENROLL_SB")" \
@@ -1621,6 +1749,8 @@ else
   INSTALL_PODMAN=N; INSTALL_DOCKER=N; INSTALL_VIRT=N
   INSTALL_AVAHI=N; INSTALL_WIREGUARD=N; INSTALL_TAILSCALE=N
   INSTALL_FAIL2BAN=N; UFW_SYNCTHING=N; UFW_KDECONNECT=N
+  # Preserve packages already loaded from EXTRA_PKGS_LIST (answers replay).
+  _extras_keep=("${EXTRA_PKGS[@]}")
   EXTRA_PKGS=()
 
   flag_from_opts "$OPTS_CORE" gnome && DESKTOP=Y || true
@@ -1663,6 +1793,12 @@ else
   flag_from_opts "$OPTS_NET" fail2ban && INSTALL_FAIL2BAN=Y || true
   flag_from_opts "$OPTS_NET" ufw_syncthing && UFW_SYNCTHING=Y || true
   flag_from_opts "$OPTS_NET" ufw_kdeconnect && UFW_KDECONNECT=Y || true
+
+  # Re-apply answers extras after checklist rebuild (dedupe later at pacstrap).
+  if ((${#_extras_keep[@]})); then
+    EXTRA_PKGS+=("${_extras_keep[@]}")
+  fi
+  unset -v _extras_keep
 
   if [[ $SKIP_REFLECTOR != Y ]]; then
     REFLECTOR_COUNTRY="$(ui_input "Reflector --country (ISO codes, comma-ok; empty=worldwide)" \
@@ -1710,11 +1846,11 @@ fi
 if yn_on "$SKIP_THINKPAD_HW"; then
   INSTALL_THINKFAN=N
 fi
-# Fresh-format ESP already empty; keep CLEAN_ESP_ARCH=Y for answers consistency.
+# Fresh-format ESP already empty; CLEAN_ESP_ARCH is ignored (forced Y in answers).
 if [[ ${FORMAT_EFI:-1} == 1 ]]; then
   CLEAN_ESP_ARCH=Y
 elif ! yn_on "${CLEAN_ESP_ARCH:-Y}"; then
-  warn "CLEAN_ESP_ARCH=N — keeping prior Arch UKIs/entries; kernels/ucode still removed to avoid pacstrap conflicts"
+  warn "CLEAN_ESP_ARCH=N — keeping prior Arch UKIs/arch*.conf; kernels/ucode still removed (pacstrap). Boot menu may show dead entries until you delete them."
 fi
 # Reflector country sanitize (letters/comma/space only).
 if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
@@ -1762,6 +1898,7 @@ done
 unset -v _flag
 
 # ── final summary ───────────────────────────────────────────
+ui_step 10 Review
 _REVIEW="REVIEW — nothing has been written yet.
 
   Disk          $DISK $(size_mb "$DISK")MB ($([[ $MODE == auto ]] && echo "AUTO wipe, ${ESP_MB}MB ESP" || echo manual))
@@ -1796,7 +1933,7 @@ if (( NONINTERACTIVE )); then
   printf '%s\n' "$_REVIEW" | while IFS= read -r _l; do say "$_l"; done
 else
   ui_info "$_REVIEW"
-  ui_yesno "Start the installation? The partitions above will be ERASED." no critical \
+  ui_yesno "Start the installation? The partitions above will be ERASED." no erase \
     || die "aborted by user"
 fi
 unset -v _REVIEW _l
@@ -1816,6 +1953,7 @@ if (( DRYRUN )); then
 fi
 
 start_log
+ui_step 11 Install
 
 # ── 4b. write the partition table (AUTO only) ───────────────
 if [[ $MODE == auto ]]; then
@@ -2111,7 +2249,7 @@ if yn_on "${CLEAN_ESP_ARCH}"; then
   rm -f /boot/EFI/Linux/arch-linux*.efi /boot/EFI/Linux/arch*.efi 2>/dev/null || true
   if [[ -d /boot/loader/entries ]]; then
     find /boot/loader/entries -maxdepth 1 -type f \
-      \( -name 'arch*.conf' -o -name 'linux-*.conf' \) -delete 2>/dev/null || true
+      -name 'arch*.conf' -delete 2>/dev/null || true
   fi
   rm -rf /boot/EFI/arch /boot/EFI/Arch /boot/EFI/ARCH 2>/dev/null || true
 fi
@@ -2711,15 +2849,16 @@ This downloads and executes remote code. Continue only if you trust the URL." no
 fi
 
 # ── 8. finish ───────────────────────────────────────────────
-if [[ ${DESKTOP^^} != N* ]]; then
+ui_step 0 Done
+if yn_on "$DESKTOP"; then
   LOGIN_HINT="First login via GDM (Wayland)."
-  FLATPAK_HINT="Optional post-boot: flatpak install --system -y flathub com.google.Chrome"
+  FLATPAK_HINT="Optional post-boot: flatpak install --user -y flathub com.google.Chrome"
 else
   LOGIN_HINT="Desktop skipped — log in on a virtual console (getty) as ${USERNAME}."
   FLATPAK_HINT="Optional later: pacman -S gnome-shell gdm flatpak && systemctl enable gdm"
 fi
 yn_on "$INSTALL_CHROME_HINT" \
-  && FLATPAK_HINT="Chrome helper: ~${USERNAME}/install-chrome-flatpak.sh (or flatpak install com.google.Chrome)"
+  && FLATPAK_HINT="Chrome helper: ~${USERNAME}/install-chrome-flatpak.sh (flatpak install --user -y flathub com.google.Chrome)"
 
 if yn_on "$INSTALL_SNAPPER_HOME"; then
   SNAPPER_HINT="root + home configs enabled"
