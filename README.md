@@ -202,10 +202,12 @@ bash install.sh
 Required in answers: `DISK`, `MODE`, identity (`HOSTNAME` `TIMEZONE` `LOCALE`
 `KEYMAP` `USERNAME`), and for AUTO also `ESP_MB` (`1024|2048|4096`). MANUAL
 also needs `EFI_PART` / `ROOT_PART` on that same `DISK` (ESP ≥512 MB,
-ROOT ≥8 GB). Identity is checked **before** wipe/LUKS: hostname DNS labels,
-username POSIX ≤32 and not an existing user/group, timezone path + TZif
-(not Factory/leapseconds/…), locale in SUPPORTED/`locale.gen`, keymap via
-`localectl` or an exact on-disk map name.
+ROOT ≥8 GB). Identity is checked **before** wipe/LUKS: hostname DNS labels (single label
+or dotted FQDN), username POSIX ≤32 and not an existing user/group, timezone
+path + TZif (not Factory/leapseconds/…), locale in SUPPORTED/`locale.gen`,
+keymap via `localectl` or an exact on-disk map name. `/etc/hosts` uses
+`127.0.1.1 <fqdn> <short>` for a dotted hostname, or
+`<hostname>.localdomain <hostname>` for a single label.
 `FORMAT_EFI` optional (`0` reuse / `1` format; default `1`).
 `LUKS_WIPE` must be `none|fast|normal` (default `none`).
 `PACMAN_PARALLEL` / `BTRFS_COMPRESS` / `ZRAM_SIZE` optional but must be valid
@@ -439,7 +441,8 @@ T14S_DRYRUN=1 bash install.sh
 ```
 
 `T14S_DRYRUN=1` skips root/UEFI/network checks and does **not**
-`umount`/`swapoff`/`cryptsetup close`. Still needs a TTY for menus.
+`umount`/`swapoff`/`cryptsetup close`. Interactive dry runs still need a
+TTY for menus; `T14S_NONINTERACTIVE=1` dry runs do not (CI uses that path).
 NONINTERACTIVE VM runs auto-set `SKIP_THINKPAD_HW=Y`.
 
 ---
@@ -464,7 +467,8 @@ T14S_NONINTERACTIVE=1 T14S_I_WILL_ERASE=1 \
 
 GitHub Actions: smoke + shellcheck on push. Smoke includes a
 `T14S_DRYRUN=1` NONINTERACTIVE run against a whole-disk block device
-(no writes past the DRYRUN exit).
+(no TTY; no writes past the DRYRUN exit; keymap via
+`T14S_IDENTITY_OVERRIDES` + `KEYMAP_DIR` fixture on Ubuntu runners).
 
 ## License
 
