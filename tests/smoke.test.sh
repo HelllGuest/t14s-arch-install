@@ -703,14 +703,33 @@ for i, ln in enumerate(t):
                 break
         break
 assert dry is not None, 'DRYRUN summary + exit 0 not found'
-# Match real invocations, not menu/help prose mentioning mkfs.
-pat = re.compile(
-    r'^\s*(sgdisk --zap-all|cryptsetup luksFormat|wipefs -a|mkfs\.fat|mkfs\.btrfs|dd if=/dev/)'
+# Match command starts, including after | ; & && || (piped cryptsetup etc.).
+# Line-position only (not call order); live dry-run covers runtime.
+cmd = (
+    r'(?:^|[|;&]|&&|\|\|)\s*'
+    r'(?:sgdisk --zap-all|cryptsetup (?:luksFormat|open)|wipefs -a|'
+    r'mkfs\.fat|mkfs\.btrfs|dd if=/dev/)'
 )
-before = [f'{i+1}:{t[i].strip()}' for i in range(dry) if pat.search(t[i])]
+pat = re.compile(cmd)
+
+def hits(lines):
+    out = []
+    for i, ln in enumerate(lines):
+        s = ln.lstrip()
+        if not s or s.startswith('#'):
+            continue
+        if pat.search(ln):
+            out.append(f'{i+1}:{ln.strip()}')
+    return out
+
+before = hits(t[:dry])
 if before:
     raise SystemExit('destructive cmds before DRYRUN exit:\n  ' + '\n  '.join(before))
-assert any(pat.search(ln) for ln in t[dry+1:]), 'no destructive cmds after DRYRUN exit'
+after = hits(t[dry+1:])
+assert after, 'no destructive cmds after DRYRUN exit'
+# Piped cryptsetup must be visible to the scanner (regression for ^\s* anchor).
+assert any('cryptsetup luksFormat' in x for x in after), \
+    'piped cryptsetup luksFormat not detected after DRYRUN exit'
 print('ok DRYRUN exit before destructive phase')
 PY
 
