@@ -469,8 +469,6 @@ ui_error()    { ui_msg error "$@"; }
 ui_critical() { ui_msg critical "$@"; }
 ui_ok()       { ui_msg ok "$@"; }
 
-# Generic msgbox defaults to info (backward-compatible call sites).
-ui_msgbox() { ui_info "$@"; }
 
 ui_view_log() {
   touch "$LOG" 2>/dev/null || true
@@ -765,6 +763,20 @@ step() { say "$*"; ui_infobox "$*"; }
 start_log() { LOGGING=1; exec 8>&1 9>&2; exec >>"$LOG" 2>&1; }
 stop_log()  { exec >&8 2>&9; LOGGING=0; }
 
+# Plain-console header for a long step (label + where to follow the log).
+progress_banner() {
+  {
+    printf '\n'
+    printf '────────────────────────────────────────────────────────\n'
+    printf ' %s\n' "$1"
+    printf ' log: %s\n' "$LOG"
+    printf ' (live output — can take several minutes)\n'
+    printf ' tip: other TTY → tail -f %s\n' "$LOG"
+    printf '────────────────────────────────────────────────────────\n\n'
+  } >/dev/tty
+  return 0
+}
+
 # Run a long command with live TUI/console output AND append to $LOG.
 # Usage: run_progress "label" cmd [args…]
 run_progress() {
@@ -786,15 +798,7 @@ log: $LOG" "$H" "$W"
     return "$rc"
   fi
   if [[ -w /dev/tty ]]; then
-    {
-      printf '\n'
-      printf '────────────────────────────────────────────────────────\n'
-      printf ' %s\n' "$desc"
-      printf ' log: %s\n' "$LOG"
-      printf ' (live output — can take several minutes)\n'
-      printf ' tip: other TTY → tail -f %s\n' "$LOG"
-      printf '────────────────────────────────────────────────────────\n\n'
-    } >/dev/tty
+    progress_banner "$desc"
     set +e
     # Pipe steals stdout from exec→LOG; tee -a keeps the file in sync.
     "$@" 2>&1 | tee -a "$LOG" >/dev/tty
@@ -808,7 +812,7 @@ log: $LOG" "$H" "$W"
 # Turn command output (stdin) into a progress estimate. Raw lines always go to
 # $LOG. Signals understood:
 #   "@@STAGE lo hi text"   chroot stage marker: new band lo–hi %, caption text
-#   "Packages (N) …"       pacman transaction size
+#   "Packages (N) …"       pacman transaction size ("Package (N)" with VerbosePkgLists)
 #   curl "% Total" header / " … downloading…"   one package download started
 #   "( k/N) verb …"        pacman counters (keys/integrity/install/hooks)
 #   ">> text"              installer say() line → detail caption
@@ -818,8 +822,9 @@ log: $LOG" "$H" "$W"
 # $3 = gauge: emit dialog/whiptail --gauge protocol on stdout
 #      text:  echo raw lines (markers become ">> [nn%] text") for plain consoles
 # $4 = step label repeated at the top of every gauge caption
+# $5 = footer line on every caption (log path / tail -f hint)
 progress_filter() {
-  local lo=${1:-0} hi=${2:-100} mode=${3:-gauge} desc=${4:-}
+  local lo=${1:-0} hi=${2:-100} mode=${3:-gauge} desc=${4:-} hint=${5:-}
   local line clean pct=$lo new stage="" detail="" total=0 dl=0
   local cur tot what blo bhi esc=$'\e'
   shopt -s extglob
@@ -832,7 +837,7 @@ progress_filter() {
       lo=${BASH_REMATCH[1]} hi=${BASH_REMATCH[2]} stage=${BASH_REMATCH[3]}
       detail="" total=0 dl=0 pct=$lo   # stages are sequential: jump to band start
       if [[ $mode == text ]]; then printf '>> [%s%%] %s\n' "$lo" "$stage"; continue; fi
-    elif [[ $clean =~ ^Packages\ \(([0-9]+)\) ]]; then
+    elif [[ $clean =~ ^Packages?\ \(([0-9]+)\) ]]; then
       total=${BASH_REMATCH[1]} dl=0
       detail="resolving ${total} packages"
     elif [[ $line == *"% Total"*"% Received"* || $clean == *" downloading..." ]]; then
@@ -860,8 +865,8 @@ progress_filter() {
     if [[ $mode == text ]]; then printf '%s\n' "$line"; continue; fi
     if (( new > pct )); then pct=$new; fi
     if (( pct > 99 )); then pct=99; fi
-    printf 'XXX\n%s\n%s\n\n%s\n%s\nXXX\n' "$pct" "$desc" "${stage:-working…}" \
-      "${detail:0:$(( W - 8 ))}"
+    printf 'XXX\n%s\n%s\n\n%s\n%s\n\n%s\nXXX\n' "$pct" "$desc" "${stage:-working…}" \
+      "${detail:0:$(( W - 8 ))}" "$hint"
   done
   return 0
 }
@@ -871,18 +876,19 @@ progress_filter() {
 # Plain console: live raw output (stage markers shown as ">> [nn%] …").
 run_gauge() {
   local desc=$1 lo=$2 hi=$3; shift 3
-  local rc=0
+  local rc=0 hint="log: $LOG · other TTY: tail -f $LOG"
   say "$desc"
   set +e
   if [[ ( $UI == dialog || $UI == whiptail ) && -w /dev/tty ]]; then
     TUI_KEEP_STDIN=1
-    "$@" 2>&1 | progress_filter "$lo" "$hi" gauge "$desc" \
+    "$@" 2>&1 | progress_filter "$lo" "$hi" gauge "$desc" "$hint" \
       | tui --gauge "${desc}
 
-log: $LOG · other TTY: tail -f $LOG" 12 "$W" "$lo"
+${hint}" 14 "$W" "$lo"
     rc=${PIPESTATUS[0]}
     TUI_KEEP_STDIN=0
   elif [[ -w /dev/tty ]]; then
+    progress_banner "$desc"
     "$@" 2>&1 | progress_filter "$lo" "$hi" text >/dev/tty
     rc=${PIPESTATUS[0]}
   else
