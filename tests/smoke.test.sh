@@ -479,6 +479,12 @@ grep -q 'flatpak install --user' "$ROOT/README.md" \
 grep -q 'Setup Mode' "$ROOT/README.md" || fail "README SB enroll must mention Setup Mode"
 grep -q 'FORMAT_EFI=1' "$ROOT/README.md" || fail "README must note CLEAN_ESP ignored when formatting"
 grep -q 'dead entries' "$ROOT/install.sh" || fail "CLEAN_ESP_ARCH=N must warn about dead boot entries"
+# Chroot must not delete pacstrap's kernels/ucode before mkinitcpio -P
+# (regression: "'/boot/vmlinuz-linux-lts' must be readable").
+awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1} f&&/^mkinitcpio -P/{exit} f' "$ROOT/install.sh" \
+  | grep -vE '^\s*#' \
+  | grep -qE 'rm .*(/boot/vmlinuz|/boot/(amd|intel)-ucode\.img)' \
+  && fail "chroot removes /boot/vmlinuz* or *-ucode.img before mkinitcpio -P" || true
 grep -q 'sudo -u "\$USERNAME" tee -a' "$ROOT/install.sh" \
   || fail "starship must append zshrc as the user"
 ! grep -q "gtk-theme='Adwaita-dark'" "$ROOT/install.sh" \

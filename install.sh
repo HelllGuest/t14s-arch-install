@@ -2333,10 +2333,11 @@ fi
 if yn_on "${CLEAN_ESP_ARCH}"; then
   say "CLEAN_ESP_ARCH — removing old Arch UKIs / loader entries / EFI/arch"
 fi
-# Always strip leftover non-UKI kernels/ucode; full clean when CLEAN_ESP_ARCH=Y.
+# Do NOT touch /boot/vmlinuz-* or *-ucode.img here: pacstrap just installed
+# them and mkinitcpio -P below reads ALL_kver from vmlinuz. Stale copies were
+# already removed on the host before pacstrap (clean_esp_arch_files).
+# Full UKI / loader-entry clean only when CLEAN_ESP_ARCH=Y.
 # (Function inlined — chroot has no host helpers.)
-rm -f /boot/intel-ucode.img /boot/amd-ucode.img \
-      /boot/vmlinuz-linux* /boot/initramfs-linux* 2>/dev/null || true
 if yn_on "${CLEAN_ESP_ARCH}"; then
   rm -f /boot/EFI/Linux/arch-linux*.efi /boot/EFI/Linux/arch*.efi 2>/dev/null || true
   if [[ -d /boot/loader/entries ]]; then
