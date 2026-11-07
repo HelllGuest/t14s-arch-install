@@ -120,10 +120,58 @@ grep -q -- '--passwordbox' "$ROOT/install.sh" || fail "passwords must use a TUI 
 grep -q 'ui_yesno' "$ROOT/install.sh" || fail "choices must use ui_yesno"
 grep -q 'T14S_DRYRUN' "$ROOT/install.sh" || fail "must keep a dry-run stop point"
 grep -q 'run_progress' "$ROOT/install.sh" || fail "must define run_progress for live pacstrap output"
-grep -q 'run_progress "pacstrap' "$ROOT/install.sh" \
-  || fail "pacstrap must use run_progress (visible on TTY)"
-grep -q 'run_progress "running chroot' "$ROOT/install.sh" \
-  || fail "chroot must use run_progress"
+grep -q 'run_gauge "pacstrap' "$ROOT/install.sh" \
+  || fail "pacstrap must use run_gauge (percent gauge, live on plain TTY)"
+grep -q 'run_gauge "chroot config' "$ROOT/install.sh" \
+  || fail "chroot must use run_gauge"
+
+# progress_filter: pacman/curl/stage lines → monotonic gauge percent per band
+python3 - "$ROOT/install.sh" <<'PY' || fail "chroot stage markers must be ascending, 0→100, contiguous"
+import re, sys
+t = open(sys.argv[1]).read()
+i = t.index("cat > /mnt/root/chroot-setup.sh <<'CHROOT'"); j = t.index('\nCHROOT\n', i)
+st = [(int(a), int(b)) for a, b in re.findall(r'^stage (\d+) (\d+) "', t[i:j], re.M)]
+assert len(st) >= 8, st
+assert st[0][0] == 0 and st[-1][1] == 100, st
+for (a, b), (c, d) in zip(st, st[1:]):
+    assert a < b and b == c, (a, b, c, d)
+print('ok chroot stage markers')
+PY
+_pf_out="$(bash -c '
+  eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
+  LOG=/dev/null W=72
+  { printf "Packages (2) a-1 b-1\n"
+    printf "  %% Total    %% Received %% Xferd\r 100 1M\n"
+    printf "  %% Total    %% Received %% Xferd\r 100 1M\n"
+    printf "(1/2) checking keys in keyring\n(2/2) installing b\n(1/1) Updating initcpios...\n"
+    printf "@@STAGE 34 72 GNOME\n(100/100) installing gnome-shell\n"
+  } | progress_filter 0 100 gauge step | awk "p==\"XXX\" && /^[0-9]+\$/{print} {p=\$0}"
+' _ "$ROOT/install.sh")"
+[[ "$(printf '%s\n' "$_pf_out" | tr '\n' ' ')" == "0 20 40 45 95 99 34 70 " ]] \
+  || fail "progress_filter percents wrong: $(printf '%s\n' "$_pf_out" | tr '\n' ' ')"
+echo "ok progress_filter percents"
+
+# Palette readability on the 8-colour Linux console (ISO):
+#   dialogrc: no BLACK foreground with highlight ON (renders dark grey)
+#   newt:     no bright/"yellow"/"white" background; only S-Lang colour names
+python3 - "$ROOT/install.sh" <<'PY' || fail "TUI palette breaks console readability rules"
+import re, sys
+t = open(sys.argv[1]).read()
+bad = re.findall(r'\(BLACK,[A-Z]+,ON\)', t)
+assert not bad, f'bold BLACK fg: {bad}'
+names = {'black','red','green','brown','blue','magenta','cyan','lightgray','gray',
+         'brightred','brightgreen','yellow','brightblue','brightmagenta','brightcyan','white',''}
+dim_bg = {'black','red','green','brown','blue','magenta','cyan','lightgray',''}
+for blk in re.findall(r"^NEWT_COLORS_[A-Z]+='\n(.*?)\n'", t, re.S | re.M):
+    for ln in blk.splitlines():
+        k, _, v = ln.partition('=')
+        fg, _, bg = v.partition(',')
+        assert fg in names and bg in names, f'unknown S-Lang colour: {ln}'
+        if k not in ('emptyscale', 'fullscale'):
+            assert bg in dim_bg, f'bright background (console cannot show): {ln}'
+assert 'NEWT_COLORS="${NEWT_COLORS_BASE}${TUI_NEWT:-}"' in t, 'severity overlays must extend base'
+print('ok TUI palette rules')
+PY
 grep -q 'ui_view_log' "$ROOT/install.sh" || fail "must offer ui_view_log"
 grep -q 'ui_checklist' "$ROOT/install.sh" || fail "must offer ui_checklist multi-select"
 grep -q 'ui_info' "$ROOT/install.sh" || fail "must define ui_info"

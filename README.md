@@ -238,9 +238,14 @@ or `linux-*.conf`) · `EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are
 
 ### Message severity
 
-Colored boxes. Theme base: dark blue screen, cyan chrome, yellow focus. Each
-severity swaps chrome for both backends (**per-severity** `DIALOGRC` /
-`NEWT_COLORS`). Badge text always present (not color-only; Primer CLI a11y).
+Colored boxes. Theme base: dark blue screen, cyan chrome; focus is always
+bright white on blue. Each severity swaps only the frame/title for both
+backends (**per-severity** `DIALOGRC` / `NEWT_COLORS`, layered on the base).
+Badge text always present (not color-only; Primer CLI a11y).
+
+Palette is built for the ISO's 8-colour Linux console: no bold black text
+(renders dark grey), no bright backgrounds (yellow shows as brown, white as
+grey), newt colours use S-Lang names only. Smoke tests enforce these rules.
 
 **`ui_msg` / `ui_info`…`ui_ok` / `die`** (message boxes; OK/Continue only):
 
@@ -279,8 +284,10 @@ disk path and a second wipe confirm.
 
 Interactive: nothing destructive before the final confirm. Unattended: wipe
 starts after answers + `T14S_PASS_FILE` + `T14S_I_WILL_ERASE=1` validate (no
-confirm UI). Log: `/tmp/t14s-install.*.log`. Long steps use
-`dialog --progressbox` when available. Passwords enter chroot via a `0600`
+confirm UI). Log: `/tmp/t14s-install.*.log`. pacstrap and the chroot step
+show a percentage gauge (dialog or whiptail `--gauge`): downloads, package
+installs `(k/N)`, hooks, then named chroot stages (UKIs, GNOME, Secure Boot…).
+Other long steps use `dialog --progressbox`; the plain UI streams raw output. Passwords enter chroot via a `0600`
 file (not env), then shred. UKI build fails if ESP free space is under 64 MB.
 `sbctl verify` must pass before enroll.
 

@@ -148,98 +148,89 @@ _tui_btns() {
 }
 
 # Base palettes: dialogrc (ncurses) + NEWT_COLORS (whiptail).
-# Dark blue screen, cyan accents, yellow focus — readable on ISO VGA + modern TTYs.
+# The ISO's Linux console has 8 background colours and treats bold/"bright" as
+# the intensity bit: bold BLACK text renders dark grey, and bright backgrounds
+# fall back to their dim pair (yellow → brown, white → lightgray). Rules:
+#   * never BLACK foreground with highlight ON (dialog) — unreadable grey;
+#   * backgrounds only from the 8 normal colours (newt: no bright*/yellow/white bg);
+#   * one focus colour everywhere: bright WHITE on BLUE;
+#   * newt uses S-Lang names (yellow = bright, brown = dim; no "brightyellow").
+# Severity overlays are appended to NEWT_COLORS_BASE in tui() (later keys win).
 NEWT_COLORS_BASE='
 root=white,blue
 roottext=brightcyan,blue
 border=brightcyan,black
-window=white,black
+window=lightgray,black
 shadow=black,black
-title=brightyellow,black
-button=black,brightyellow
-actbutton=black,brightcyan
-compactbutton=black,white
-checkbox=white,black
-actcheckbox=black,brightcyan
+title=yellow,black
+button=black,lightgray
+actbutton=white,blue
+compactbutton=lightgray,black
+checkbox=lightgray,black
+actcheckbox=white,blue
 entry=white,black
 label=brightcyan,black
-listbox=white,black
-actlistbox=black,cyan
-sellistbox=black,brightyellow
-actsellistbox=black,brightcyan
-textbox=white,black
-acttextbox=black,cyan
+listbox=lightgray,black
+actlistbox=white,blue
+sellistbox=yellow,black
+actsellistbox=white,blue
+textbox=lightgray,black
+acttextbox=white,blue
 helpline=black,cyan
-emptyscale=black,blue
-fullscale=black,cyan
+emptyscale=,black
+fullscale=,cyan
 disentry=gray,black
 '
 
 NEWT_COLORS_INFO='
-root=white,blue
 border=brightcyan,black
-window=white,black
 title=brightcyan,black
-textbox=white,black
-button=black,brightcyan
-actbutton=black,brightyellow
 '
 NEWT_COLORS_WARN='
-root=black,brown
-border=brightyellow,black
-window=black,brown
-title=brightyellow,black
-textbox=white,black
-button=black,brightyellow
-actbutton=black,white
+root=yellow,black
+border=yellow,black
+title=yellow,black
 '
 NEWT_COLORS_ERROR='
 root=white,red
 border=brightred,black
-window=white,red
 title=white,red
-textbox=white,red
-button=black,white
-actbutton=black,brightyellow
 '
 NEWT_COLORS_CRITICAL='
-root=brightyellow,red
-border=brightyellow,red
-window=brightyellow,red
-title=brightyellow,red
-textbox=brightyellow,red
-button=red,brightyellow
-actbutton=black,white
+root=yellow,red
+border=yellow,red
+window=yellow,red
+title=yellow,red
+textbox=yellow,red
 '
 NEWT_COLORS_OK='
 root=white,green
 border=brightgreen,black
-window=white,black
 title=brightgreen,black
-textbox=white,black
-button=black,brightgreen
-actbutton=black,brightyellow
 '
 
-# Write one dialogrc: $1 path, then screen/title/border/button_active colors.
+# Write one dialogrc: $1 path, then screen/title/border colours. Severity only
+# changes the frame; focus is always bright WHITE on BLUE and BLACK text is never
+# bold (see palette rules above).
 _write_one_dialogrc() {
-  local path=$1 screen=$2 title=$3 border=$4 btn=$5
+  local path=$1 screen=$2 title=$3 border=$4
+  local focus='(WHITE,BLUE,ON)'
   cat >"$path" <<EOF
 # T14s installer theme
 use_shadow = ON
 use_colors = ON
 screen_color = $screen
-shadow_color = (BLACK,BLACK,ON)
+shadow_color = (BLACK,BLACK,OFF)
 dialog_color = (WHITE,BLACK,OFF)
 title_color = $title
 border_color = $border
 border2_color = (BLUE,BLACK,ON)
-button_active_color = $btn
+button_active_color = $focus
 button_inactive_color = (WHITE,BLACK,OFF)
-button_key_active_color = $btn
+button_key_active_color = (YELLOW,BLUE,ON)
 button_key_inactive_color = (YELLOW,BLACK,ON)
-button_label_active_color = $btn
-button_label_inactive_color = (WHITE,BLACK,ON)
+button_label_active_color = $focus
+button_label_inactive_color = (WHITE,BLACK,OFF)
 inputbox_color = (WHITE,BLACK,OFF)
 inputbox_border_color = $border
 inputbox_border2_color = (BLUE,BLACK,ON)
@@ -251,17 +242,17 @@ menubox_color = (WHITE,BLACK,OFF)
 menubox_border_color = $border
 menubox_border2_color = (BLUE,BLACK,ON)
 item_color = (WHITE,BLACK,OFF)
-item_selected_color = (BLACK,CYAN,ON)
+item_selected_color = $focus
 tag_color = $title
-tag_selected_color = (BLACK,CYAN,ON)
+tag_selected_color = $focus
 tag_key_color = (YELLOW,BLACK,ON)
-tag_key_selected_color = (YELLOW,CYAN,ON)
+tag_key_selected_color = (YELLOW,BLUE,ON)
 check_color = (WHITE,BLACK,OFF)
-check_selected_color = (BLACK,CYAN,ON)
+check_selected_color = $focus
 uarrow_color = (GREEN,BLACK,ON)
 darrow_color = (GREEN,BLACK,ON)
 itemhelp_color = (BLACK,CYAN,OFF)
-form_active_text_color = (BLACK,CYAN,ON)
+form_active_text_color = $focus
 form_text_color = (WHITE,BLACK,OFF)
 form_item_readonly_color = (CYAN,BLACK,ON)
 gauge_color = (CYAN,BLACK,ON)
@@ -280,17 +271,17 @@ write_dialogrc() {
   DIALOG_RC_CRITICAL="$base/critical"
   DIALOG_RC_OK="$base/ok"
   _write_one_dialogrc "$DIALOG_RC" \
-    '(CYAN,BLUE,ON)' '(YELLOW,BLACK,ON)' '(CYAN,BLACK,ON)' '(BLACK,YELLOW,ON)'
+    '(CYAN,BLUE,ON)' '(YELLOW,BLACK,ON)' '(CYAN,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_INFO" \
-    '(CYAN,BLUE,ON)' '(CYAN,BLACK,ON)' '(CYAN,BLACK,ON)' '(BLACK,CYAN,ON)'
+    '(CYAN,BLUE,ON)' '(CYAN,BLACK,ON)' '(CYAN,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_WARN" \
-    '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)' '(BLACK,YELLOW,ON)'
+    '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_ERROR" \
-    '(WHITE,RED,ON)' '(WHITE,RED,ON)' '(RED,BLACK,ON)' '(BLACK,WHITE,ON)'
+    '(WHITE,RED,ON)' '(WHITE,RED,ON)' '(RED,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_CRITICAL" \
-    '(YELLOW,RED,ON)' '(YELLOW,RED,ON)' '(YELLOW,RED,ON)' '(RED,YELLOW,ON)'
+    '(YELLOW,RED,ON)' '(YELLOW,RED,ON)' '(YELLOW,RED,ON)'
   _write_one_dialogrc "$DIALOG_RC_OK" \
-    '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)' '(BLACK,GREEN,ON)'
+    '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)'
   export DIALOGRC="$DIALOG_RC"
   export NEWT_COLORS="$NEWT_COLORS_BASE"
 }
@@ -328,11 +319,11 @@ tui() {
       ;;
     whiptail)
       if [[ ${TUI_KEEP_STDIN:-0} == 1 ]]; then
-        NEWT_COLORS="${TUI_NEWT:-${NEWT_COLORS:-$NEWT_COLORS_BASE}}" \
+        NEWT_COLORS="${NEWT_COLORS_BASE}${TUI_NEWT:-}" \
           whiptail --backtitle "$back" --title "$title" \
           "$@" 3>&1 1>/dev/tty 2>&3
       else
-        NEWT_COLORS="${TUI_NEWT:-${NEWT_COLORS:-$NEWT_COLORS_BASE}}" \
+        NEWT_COLORS="${NEWT_COLORS_BASE}${TUI_NEWT:-}" \
           whiptail --backtitle "$back" --title "$title" \
           "$@" 3>&1 1>/dev/tty 2>&3 </dev/tty
       fi
@@ -403,7 +394,7 @@ ui_msg() {
       title="Info — $APP_TITLE"
       badge="INFO"
       plain_c=$cC
-      body='\Zb\Z4[ INFO ]\Zn'$'\n\n'"$folded"
+      body='\Zb\Z6[ INFO ]\Zn'$'\n\n'"$folded"
       newt=$NEWT_COLORS_INFO
       drc=${DIALOG_RC_INFO:-$DIALOG_RC}
       ;;
@@ -444,7 +435,7 @@ ui_msg() {
       badge="NOTE"
       plain_c=$cB
       body=$folded
-      newt=$NEWT_COLORS_BASE
+      newt=
       drc=$DIALOG_RC
       ;;
   esac
@@ -812,6 +803,94 @@ log: $LOG" "$H" "$W"
     return "$rc"
   fi
   "$@"
+}
+
+# Turn command output (stdin) into a progress estimate. Raw lines always go to
+# $LOG. Signals understood:
+#   "@@STAGE lo hi text"   chroot stage marker: new band lo–hi %, caption text
+#   "Packages (N) …"       pacman transaction size
+#   curl "% Total" header / " … downloading…"   one package download started
+#   "( k/N) verb …"        pacman counters (keys/integrity/install/hooks)
+#   ">> text"              installer say() line → detail caption
+# pacman phases inside the current band: download 0–40 %, verify 40–50 %,
+# install 50–95 %, hooks 95–100 %. Percent only moves forward inside a band
+# (a new @@STAGE sets it to the band start); capped at 99 until the command exits.
+# $3 = gauge: emit dialog/whiptail --gauge protocol on stdout
+#      text:  echo raw lines (markers become ">> [nn%] text") for plain consoles
+# $4 = step label repeated at the top of every gauge caption
+progress_filter() {
+  local lo=${1:-0} hi=${2:-100} mode=${3:-gauge} desc=${4:-}
+  local line clean pct=$lo new stage="" detail="" total=0 dl=0
+  local cur tot what blo bhi esc=$'\e'
+  shopt -s extglob
+  while IFS= read -r line || [[ -n $line ]]; do
+    printf '%s\n' "$line" >>"$LOG"
+    clean=${line##*$'\r'}
+    clean=${clean//$esc\[*([0-9;])[a-zA-Z]/}
+    new=-1
+    if [[ $clean =~ ^@@STAGE\ ([0-9]+)\ ([0-9]+)\ (.*)$ ]]; then
+      lo=${BASH_REMATCH[1]} hi=${BASH_REMATCH[2]} stage=${BASH_REMATCH[3]}
+      detail="" total=0 dl=0 pct=$lo   # stages are sequential: jump to band start
+      if [[ $mode == text ]]; then printf '>> [%s%%] %s\n' "$lo" "$stage"; continue; fi
+    elif [[ $clean =~ ^Packages\ \(([0-9]+)\) ]]; then
+      total=${BASH_REMATCH[1]} dl=0
+      detail="resolving ${total} packages"
+    elif [[ $line == *"% Total"*"% Received"* || $clean == *" downloading..." ]]; then
+      dl=$(( dl + 1 ))
+      if (( total > 0 )); then
+        (( dl > total )) && dl=$total
+        new=$(( lo + (hi - lo) * 40 * dl / (100 * total) ))
+        detail="downloading packages (${dl}/${total})"
+      else
+        detail="downloading packages (${dl})"
+      fi
+    elif [[ $clean =~ ^\(\ *([0-9]+)/([0-9]+)\)\ (.+)$ ]]; then
+      cur=${BASH_REMATCH[1]} tot=${BASH_REMATCH[2]} what=${BASH_REMATCH[3]}
+      (( tot > 0 )) || tot=1
+      case $what in
+        installing\ *|upgrading\ *|reinstalling\ *) blo=50 bhi=95 ;;
+        checking\ *|loading\ *) blo=40 bhi=50 ;;
+        *) blo=95 bhi=100 ;;
+      esac
+      new=$(( lo + (hi - lo) * (blo + (bhi - blo) * cur / tot) / 100 ))
+      detail="${what%%...*} (${cur}/${tot})"
+    elif [[ $clean =~ ^\>\>\ (.+)$ ]]; then
+      detail=${BASH_REMATCH[1]}
+    fi
+    if [[ $mode == text ]]; then printf '%s\n' "$line"; continue; fi
+    if (( new > pct )); then pct=$new; fi
+    if (( pct > 99 )); then pct=99; fi
+    printf 'XXX\n%s\n%s\n\n%s\n%s\nXXX\n' "$pct" "$desc" "${stage:-working…}" \
+      "${detail:0:$(( W - 8 ))}"
+  done
+  return 0
+}
+
+# Long step with a percentage gauge (dialog/whiptail), fed by progress_filter.
+# Usage: run_gauge "label" lo hi cmd [args…]   (lo/hi = initial % band)
+# Plain console: live raw output (stage markers shown as ">> [nn%] …").
+run_gauge() {
+  local desc=$1 lo=$2 hi=$3; shift 3
+  local rc=0
+  say "$desc"
+  set +e
+  if [[ ( $UI == dialog || $UI == whiptail ) && -w /dev/tty ]]; then
+    TUI_KEEP_STDIN=1
+    "$@" 2>&1 | progress_filter "$lo" "$hi" gauge "$desc" \
+      | tui --gauge "${desc}
+
+log: $LOG · other TTY: tail -f $LOG" 12 "$W" "$lo"
+    rc=${PIPESTATUS[0]}
+    TUI_KEEP_STDIN=0
+  elif [[ -w /dev/tty ]]; then
+    "$@" 2>&1 | progress_filter "$lo" "$hi" text >/dev/tty
+    rc=${PIPESTATUS[0]}
+  else
+    "$@" 2>&1 | progress_filter "$lo" "$hi" text >/dev/null
+    rc=${PIPESTATUS[0]}
+  fi
+  set -e
+  return "$rc"
 }
 
 bootstrap_ui() {
@@ -2191,7 +2270,7 @@ if ((${#EXTRA_PKGS[@]})); then
   EXTRA_PKGS=("${_extra_clean[@]}")
   unset -v _seen _extra_clean _p
 fi
-run_progress "pacstrap base system ($UCODE) — downloading/installing packages" \
+run_gauge "pacstrap base system ($UCODE) — downloading/installing packages" 0 100 \
   pacstrap -K /mnt "${BASE_PKGS[@]}" ${EXTRA_PKGS[@]+"${EXTRA_PKGS[@]}"}
 
 step "genfstab"
@@ -2206,8 +2285,11 @@ cat > /mnt/root/chroot-setup.sh <<'CHROOT'
 #!/usr/bin/env bash
 set -euo pipefail
 say(){ printf '\e[1;34m>>\e[0m %s\n' "$*"; }
+# Progress marker for the host gauge (progress_filter): stage <lo%> <hi%> <text>
+stage(){ printf '@@STAGE %s %s %s\n' "$1" "$2" "$3"; }
 yn_on() { local v=${1,,}; [[ $v == y || $v == yes || $v == on || $v == 1 ]]; }
 
+stage 0 4 "locale, time, hostname"
 # time / locale / keymap
 if [[ $TIMEZONE == UTC ]]; then
   ln -sf /usr/share/zoneinfo/UTC /etc/localtime
@@ -2243,6 +2325,7 @@ EOF
 fi
 unset -v _host_short
 
+stage 4 6 "users and passwords"
 # users — secrets from /root/.t14s-install-secrets (0600; shredded after chroot)
 # shellcheck disable=SC1091
 source /root/.t14s-install-secrets
@@ -2252,6 +2335,7 @@ echo "${USERNAME}:${USER_PASS}" | chpasswd
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 unset -v USER_PASS ROOT_PASS
 rm -f /root/.t14s-install-secrets
+stage 6 8 "initramfs and kernel cmdline"
 # initramfs (systemd + sd-encrypt for LUKS; optional plymouth)
 _HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)'
 if yn_on "${INSTALL_PLYMOUTH}"; then
@@ -2328,6 +2412,7 @@ else
   say "SKIP_THINKPAD_HW — charge thresholds not installed"
 fi
 
+stage 8 24 "building unified kernel images"
 # UKI presets: linux-lts (primary) + linux-hardened (fallback)
 # Re-clean Arch EFI artifacts before rebuild (host already cleaned /mnt/boot).
 if yn_on "${CLEAN_ESP_ARCH}"; then
@@ -2398,6 +2483,7 @@ if [[ ${_esp_free_mb:-} =~ ^[0-9]+$ ]]; then
 fi
 unset -v _esp_free_mb
 
+stage 24 27 "systemd-boot"
 # bootloader — when reusing a shared/multiboot ESP, back up another OS's fallback
 # loader first. On a freshly-formatted ESP there's nothing to preserve (no clutter).
 say "systemd-boot"
@@ -2415,6 +2501,7 @@ editor no
 console-mode max
 EOF
 
+stage 27 30 "zram, sysctl, firewall, mirrors"
 # zram size from wizard (half / quarter / fixed 8G)
 case ${ZRAM_SIZE:-half} in
   quarter) _zram_expr='min(ram / 4, 8192)' ;;
@@ -2474,6 +2561,7 @@ else
   sed -i "/^\\[options\\]/a ParallelDownloads = ${PACMAN_PARALLEL}" /etc/pacman.conf
 fi
 
+stage 30 34 "services and snapshots"
 # services
 systemctl enable NetworkManager apparmor ufw bluetooth fstrim.timer reflector.timer \
                  systemd-tmpfiles-clean.timer
@@ -2498,6 +2586,7 @@ if yn_on "${INSTALL_SNAPPER_HOME}"; then
   fi
 fi
 
+stage 34 72 "GNOME desktop and Flatpaks"
 # minimal GNOME (optional)
 if yn_on "$DESKTOP"; then
   say "installing minimal GNOME + browsers + VPN + software center"
@@ -2586,6 +2675,7 @@ if yn_on "$DESKTOP"; then
   fi
 fi
 
+stage 72 78 "fonts and GNOME defaults"
 # Curated Nerd Fonts + UI fonts (matches HelllGuest install-fonts.sh; not full group).
 if yn_on "${INSTALL_NERD_FONTS}"; then
   say "installing Nerd Fonts + Inter/Noto"
@@ -2636,6 +2726,7 @@ DCONF
   dconf update 2>/dev/null || true
 fi
 
+stage 78 92 "optional packages"
 # archdi print stack (optional)
 if yn_on "${INSTALL_CUPS}"; then
   say "installing CUPS printing stack"
@@ -2762,6 +2853,7 @@ if yn_on "${UFW_KDECONNECT}"; then
   ufw allow 1714:1764/udp comment 'kdeconnect' || true
 fi
 
+stage 92 95 "helpers and self-test"
 # Chrome Flatpak helper (post-boot — bwrap often fails in chroot)
 if yn_on "${INSTALL_CHROME_HINT}"; then
   sudo -u "$USERNAME" tee "/home/$USERNAME/install-chrome-flatpak.sh" >/dev/null <<'SH'
@@ -2804,6 +2896,7 @@ ST
   say "wrote /usr/local/bin/t14s-selftest"
 fi
 
+stage 95 100 "Secure Boot keys and signing"
 # Secure Boot: create + sign now; enroll only if verify clean + Setup Mode.
 say "sbctl: create keys + sign"
 sbctl create-keys
@@ -2880,7 +2973,7 @@ cleanup_chroot_secrets() {
     || rm -f /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets
 }
 # Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
-if ! run_progress "running chroot config (UKIs, users, optional GNOME)" \
+if ! run_gauge "chroot config (UKIs, users, optional GNOME)" 0 100 \
   arch-chroot /mnt env \
     TIMEZONE="$TIMEZONE" LOCALE="$LOCALE" KEYMAP="$KEYMAP" HOSTNAME="$HOSTNAME" \
     USERNAME="$USERNAME" \
