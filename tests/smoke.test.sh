@@ -499,6 +499,7 @@ grep -q 'systemctl enable t14s-flatpak-apps.service' <<<"$_chr" || fail "first-b
 grep -q 'ConditionPathExists=!/var/lib/t14s/flatpak-apps.done' <<<"$_chr" || fail "flatpak service must be one-shot (stamp)"
 grep -q 'Restart=on-failure' <<<"$_chr" || fail "flatpak service must retry until online"
 grep -q 'SNAP_PAC_SKIP=y' "$ROOT/install.sh" || fail "chroot run must set SNAP_PAC_SKIP=y"
+[[ $(grep -c 'NUMBER_LIMIT=10' <<<"$_chr") == 2 ]] || fail "snapper root and home must both set NUMBER_LIMIT=10"
 unset -v _chr
 echo "ok option wiring"
 

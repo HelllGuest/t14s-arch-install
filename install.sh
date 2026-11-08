@@ -2697,7 +2697,8 @@ if yn_on "${INSTALL_SNAPPER_HOME}"; then
   if snapper --no-dbus -c home create-config /home; then
     snapper --no-dbus -c home set-config \
       TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 TIMELINE_LIMIT_WEEKLY=0 \
-      TIMELINE_LIMIT_MONTHLY=0 TIMELINE_LIMIT_YEARLY=0 ALLOW_GROUPS=wheel SYNC_ACL=yes \
+      TIMELINE_LIMIT_MONTHLY=0 TIMELINE_LIMIT_YEARLY=0 NUMBER_LIMIT=10 \
+      ALLOW_GROUPS=wheel SYNC_ACL=yes \
       || say "WARN: snapper home set-config failed — default retention kept"
     say "snapper home config created"
   else
