@@ -72,7 +72,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 
 | Toggle | Adds / does | Why |
 | ------ | ----------- | --- |
-| GNOME | Shell, GDM, portals, PipeWire + `rtkit`, `evolution-data-server` (top-bar calendar), Flatpak browsers/VPN (one batch), `mesa`/`vulkan-radeon`, sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
+| GNOME | Shell, GDM, portals, PipeWire + `rtkit`, `evolution-data-server` (top-bar calendar), Flatpak browsers/VPN installed by a first-boot service (`t14s-flatpak-apps`, retries every 5 min until online; ~11 min of downloads off the installer), `mesa`/`vulkan-radeon`, sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
 | Nerd Fonts | Curated `ttf-*-nerd` + Inter/Noto; GNOME mono font | Readable terminals / editors |
 | Enroll sbctl now | `sbctl enroll-keys -m` if Setup Mode **and** `sbctl verify` OK | Optional first-boot SB |
 | sshd | `openssh` + UFW 22/tcp | Remote rescue |

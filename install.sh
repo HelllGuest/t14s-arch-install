@@ -2749,32 +2749,53 @@ if yn_on "$DESKTOP"; then
     mkdir -p /etc/gdm
     printf '[daemon]\nWaylandEnable=true\n' > /etc/gdm/custom.conf
     flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
-    # Skip extra-data apps (Chrome) in chroot — bwrap userns refused; install post-boot:
-    #   flatpak install --system -y flathub com.google.Chrome
-    # One flatpak transaction for all apps: shared runtimes resolve/download
-    # once (per-app installs repeated that work: ~13 min on the last T14s run).
-    # On failure fall back per app so one bad ref doesn't drop the rest.
-    stage 58 72 "Flatpak apps (browsers, VPN)"
-    _fp_apps=(com.brave.Browser app.zen_browser.zen io.gitlab.librewolf-community com.protonvpn.www)
-    failed_fp=()
-    if ! flatpak install --system -y --noninteractive flathub "${_fp_apps[@]}"; then
-      _i=0
-      for app in "${_fp_apps[@]}"; do
-        _i=$(( _i + 1 ))
-        flatpak info --system "$app" >/dev/null 2>&1 && continue
-        printf '(%d/%d) installing flatpak %s\n' "$_i" "${#_fp_apps[@]}" "$app"
-        if ! flatpak install --system -y --noninteractive flathub "$app"; then
-          failed_fp+=("$app")
-          flatpak uninstall --system -y --noninteractive "$app" >/dev/null 2>&1 || true
-          flatpak info --system "$app" >/dev/null 2>&1 || rm -rf "/var/lib/flatpak/app/$app"
-        fi
-      done
-    fi
-    unset -v _fp_apps _i
-    if (( ${#failed_fp[@]} )); then
-      say "WARN: flatpak install failed: ${failed_fp[*]}"
-      say "      retry after first boot: flatpak install --system -y flathub <app>"
-    fi
+    # Flatpak apps install on FIRST BOOT, not here: their runtimes (two
+    # freedesktop versions + GL/codecs/locale + GNOME) are pure download and
+    # took ~11 min of the last install. A oneshot after network-online does
+    # one transaction; on failure it retries every 5 min (stamp only on success).
+    # Chrome (extra-data) still needs the user helper (bwrap userns).
+    stage 58 72 "Flatpak first-boot service"
+    mkdir -p /usr/local/sbin
+    cat > /usr/local/sbin/t14s-flatpak-apps <<'FP'
+#!/usr/bin/env bash
+# First-boot Flatpak apps (written by t14s-arch-install). Log: journalctl -u t14s-flatpak-apps
+set -uo pipefail
+apps=(com.brave.Browser app.zen_browser.zen io.gitlab.librewolf-community com.protonvpn.www)
+flatpak remote-add --system --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+if ! flatpak install --system -y --noninteractive flathub "${apps[@]}"; then
+  for a in "${apps[@]}"; do
+    flatpak info --system "$a" >/dev/null 2>&1 \
+      || flatpak install --system -y --noninteractive flathub "$a" || echo "failed: $a"
+  done
+fi
+for a in "${apps[@]}"; do
+  flatpak info --system "$a" >/dev/null 2>&1 || { echo "missing $a — will retry next boot"; exit 1; }
+done
+mkdir -p /var/lib/t14s && touch /var/lib/t14s/flatpak-apps.done
+FP
+    chmod 755 /usr/local/sbin/t14s-flatpak-apps
+    cat > /etc/systemd/system/t14s-flatpak-apps.service <<'FP'
+[Unit]
+Description=Install Flatpak apps (first boot, t14s-arch-install)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=!/var/lib/t14s/flatpak-apps.done
+# First boot often has no saved Wi-Fi yet: keep retrying every 5 min
+# (oneshot + Restart= needs systemd >= 244) until the user connects.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/t14s-flatpak-apps
+Restart=on-failure
+RestartSec=5min
+TimeoutStartSec=1h
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+FP
+    systemctl enable t14s-flatpak-apps.service
     # archdi-style X11/Wayland keymap from console KEYMAP.
     # Console map names ≠ XKB layout/variant; remap commons, else best-effort.
     XKB_LAYOUT='' XKB_VARIANT=''
@@ -3139,6 +3160,8 @@ cleanup_chroot_secrets() {
   rm -f /mnt/root/t14s-lib.sh
 }
 # Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
+# SNAP_PAC_SKIP=y: snap-pac hooks can't run snapper in the chroot ("fatal
+# library error, lookup self"); snapshots start on the booted system.
 if ! run_gauge "chroot config (UKIs, users, optional GNOME)" 0 100 \
   arch-chroot /mnt env \
     TIMEZONE="$TIMEZONE" LOCALE="$LOCALE" KEYMAP="$KEYMAP" HOSTNAME="$HOSTNAME" \
@@ -3162,6 +3185,7 @@ if ! run_gauge "chroot config (UKIs, users, optional GNOME)" 0 100 \
     ZRAM_SIZE="$ZRAM_SIZE" REFLECTOR_COUNTRY="$REFLECTOR_COUNTRY" \
     SKIP_THINKPAD_HW="$SKIP_THINKPAD_HW" \
     UFW_SYNCTHING="$UFW_SYNCTHING" UFW_KDECONNECT="$UFW_KDECONNECT" \
+    SNAP_PAC_SKIP=y \
     bash /root/chroot-setup.sh
 then
   cleanup_chroot_secrets
@@ -3226,7 +3250,9 @@ fi
 # ── 8. finish ───────────────────────────────────────────────
 ui_step 0 Done
 if yn_on "$DESKTOP"; then
-  LOGIN_HINT="First login via GDM (Wayland)."
+  LOGIN_HINT="First login via GDM (Wayland).
+  Flatpak browsers/VPN install in the background on first boot once online
+  (connect Wi-Fi; retries every 5 min): journalctl -u t14s-flatpak-apps -f"
   FLATPAK_HINT="Optional post-boot: flatpak install --user -y flathub com.google.Chrome"
 else
   LOGIN_HINT="Desktop skipped — log in on a virtual console (getty) as ${USERNAME}."
