@@ -495,7 +495,9 @@ grep -q 'INSTALL COMPLETE with warnings' "$ROOT/install.sh" || fail "finish scre
 _chr="$(awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;next} f&&/^CHROOT$/{exit} f' "$ROOT/install.sh")"
 grep -qE '^\s*flatpak install --system .*\$\{_fp_apps' <<<"$_chr" \
   && fail "chroot must not download Flatpak apps (first-boot service does)" || true
-grep -q 'systemctl enable t14s-flatpak-apps.service' <<<"$_chr" || fail "first-boot flatpak service must be enabled"
+grep -q 'systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.service' <<<"$_chr" \
+  || fail "first-boot flatpak service + wait-online must be enabled"
+grep -q 'TimeoutStartSec=30min' <<<"$_chr" || fail "flatpak oneshot timeout must be 30min"
 grep -q 'ConditionPathExists=!/var/lib/t14s/flatpak-apps.done' <<<"$_chr" || fail "flatpak service must be one-shot (stamp)"
 grep -q 'Restart=on-failure' <<<"$_chr" || fail "flatpak service must retry until online"
 grep -q 'SNAP_PAC_SKIP=y' "$ROOT/install.sh" || fail "chroot run must set SNAP_PAC_SKIP=y"

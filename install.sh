@@ -2790,13 +2790,15 @@ Type=oneshot
 ExecStart=/usr/local/sbin/t14s-flatpak-apps
 Restart=on-failure
 RestartSec=5min
-TimeoutStartSec=1h
+TimeoutStartSec=30min
 Nice=10
 
 [Install]
 WantedBy=multi-user.target
 FP
-    systemctl enable t14s-flatpak-apps.service
+    # Explicit (NetworkManager's Also= enables it too) so network-online
+    # really waits for NM on boot.
+    systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.service
     # archdi-style X11/Wayland keymap from console KEYMAP.
     # Console map names ≠ XKB layout/variant; remap commons, else best-effort.
     XKB_LAYOUT='' XKB_VARIANT=''
