@@ -48,6 +48,7 @@ Pacstrapped into the new root every run:
 | `apparmor` `ufw` | MAC + firewall (enabled) |
 | `sbctl` `efibootmgr` | Secure Boot keys / EFI boot entries |
 | `xdg-user-dirs` | `~/Downloads` etc. via `xdg-user-dirs-update` |
+| `wireless-regdb` | Wi-Fi regulatory database (`regulatory.db`) |
 
 **Always configured (not always “a package”):**
 
@@ -71,15 +72,19 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 
 | Toggle | Adds / does | Why |
 | ------ | ----------- | --- |
-| GNOME | Shell, GDM, portals, PipeWire, Flatpak browsers/VPN, `mesa`/`vulkan-radeon`, sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
+| GNOME | Shell, GDM, portals, PipeWire + `rtkit`, `evolution-data-server` (top-bar calendar), Flatpak browsers/VPN (one batch), `mesa`/`vulkan-radeon`, sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
 | Nerd Fonts | Curated `ttf-*-nerd` + Inter/Noto; GNOME mono font | Readable terminals / editors |
 | Enroll sbctl now | `sbctl enroll-keys -m` if Setup Mode **and** `sbctl verify` OK | Optional first-boot SB |
 | sshd | `openssh` + UFW 22/tcp | Remote rescue |
 | CUPS | `cups` `cups-pdf` `ghostscript` | Printing |
 | Skip reflector | Keep ISO mirrorlist | Flaky/offline networks |
-| TLP | `tlp` (forced off if GNOME) | Console-only power mgmt |
+| tuned | `tuned` (+ `tuned-ppd` with GNOME, replaces `power-profiles-daemon`); `tuned-gui` ships in `tuned` | Profiles via GNOME power menu or `tuned-adm` / `tuned-gui` |
+| TLP | `tlp` (forced off if GNOME or tuned) | Console-only power mgmt |
 | thinkfan note | `/root/t14s-thinkfan.txt` (AUR; not pacstrapped) | Fan control hint |
 | Snapper `@home` | `snapper -c home` | Home snapshots |
+| btrfs-assistant | Snapper/Btrfs GUI (desktop only) | Browse/restore snapshots |
+| multilib | Enable `[multilib]` (not `-testing`) | 32-bit libs (Steam, Wine) |
+| yay | `yay-bin` built as your user, installed with `pacman -U` (no sudoers change) | AUR helper |
 | `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
 | Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
 | Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW check |
@@ -90,6 +95,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 
 | Toggle | Adds |
 | ------ | ---- |
+| Dev tools | `git-lfs` `github-cli` `lazygit` `neovim`, `python`/`pip`/`pipx`, `nodejs`/`npm`, `go`, `rustup`, `cmake` `ninja` `meson` `clang` `lldb` `gdb` `valgrind` `perf` `strace` `ltrace`, `shellcheck` `shfmt` `httpie`, man pages, `tealdeer`; `code` (OSS) with GNOME |
 | CLI bundle | `ripgrep` `fd` `fzf` `bat` `eza` `jq` `git-delta` |
 | starship | Prompt + wire into user `.zshrc` |
 | podman | `podman` `buildah` (rootless) |
@@ -115,12 +121,14 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 
 | Where | Change | Why |
 | ----- | ------ | --- |
-| Live ISO `pacman.conf` | `XferCommand` curl retries; `ParallelDownloads` | Reliable pacstrap |
+| Live ISO `pacman.conf` | Built-in downloader (any `XferCommand` removed), `ParallelDownloads`, `DisableDownloadTimeout`, Color/ILoveCandy/VerbosePkgLists | `XferCommand` serializes downloads (ParallelDownloads ignored); slow mirrors stall instead of aborting |
 | Live mirrors | Optional `reflector` (country optional) | Faster/fresher mirrors |
 | Target `/etc/mkinitcpio.conf` | systemd + `sd-encrypt` (+ plymouth if chosen) | LUKS unlock in UKI |
 | Target `/etc/kernel/cmdline` | Rembrandt + LUKS + s2idle + AppArmor | One cmdline for all UKIs |
 | Target `/etc/fstab` | UUID mounts; `/tmp` gets `nofail` | Boot even if `@tmp` fails |
-| Target pacman / reflector.conf | ParallelDownloads; weekly reflector | Same mirror story post-boot |
+| Target pacman / reflector.conf | Same `pacman.conf` tuning (+ `[multilib]` if chosen); weekly reflector; `paccache.timer` | Same mirror story post-boot; bounded cache |
+| Target `/etc/makepkg.conf.d/t14s.conf` | `MAKEFLAGS=-j$(nproc)`, `!debug` | Fast AUR builds, no `-debug` packages |
+| Target snapper configs | 5 hourly / 7 daily, `NUMBER_LIMIT=10`, `ALLOW_GROUPS=wheel` | Bounded snapshot space; GUI browse |
 | Target UFW | deny in / allow out; enabled | Firewall on first boot |
 | Target sudoers | `%wheel` enabled | User admin |
 | ESP | Format or reuse; optional Arch cleanup (`CLEAN_ESP_ARCH`) | Multiboot-safe; frees UKI space |
@@ -232,14 +240,16 @@ repo URL is hardcoded).
 `CLEAN_ESP_ARCH` (default `Y`: remove old Arch UKIs, `arch*.conf` entries,
 and `EFI/arch` dirs; kernels/ucode always cleared for pacstrap; ignored /
 forced `Y` when `FORMAT_EFI=1`; does not remove other vendors’ `EFI/*` dirs
-or `linux-*.conf`) · `EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are
+or `linux-*.conf`) · `INSTALL_MULTILIB` `INSTALL_YAY` `INSTALL_TUNED`
+`INSTALL_DEVTOOLS` `INSTALL_BTRFS_ASSISTANT` · `EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are
 **never** stored in answers. `answers_save` hard-requires mode `0600`.
 `T14S_NONINTERACTIVE` / `T14S_I_WILL_ERASE` accept `1` / `y` / `yes` / `on`.
 
 ### Message severity
 
 Colored boxes. Theme base: dark blue screen, cyan chrome; focus is always
-bright white on blue. Each severity swaps only the frame/title for both
+bright white on blue. The blue backdrop never changes, so moving between
+screens does not flash; each severity recolours only the frame/title for both
 backends (**per-severity** `DIALOGRC` / `NEWT_COLORS`, layered on the base).
 Badge text always present (not color-only; Primer CLI a11y).
 
@@ -287,7 +297,12 @@ starts after answers + `T14S_PASS_FILE` + `T14S_I_WILL_ERASE=1` validate (no
 confirm UI). Log: `/tmp/t14s-install.*.log`. pacstrap and the chroot step
 show a percentage gauge (dialog or whiptail `--gauge`): downloads, package
 installs `(k/N)`, hooks, then named chroot stages (UKIs, GNOME, Secure Boot…).
-Other long steps use `dialog --progressbox`; the plain UI streams raw output. Passwords enter chroot via a `0600`
+Other long steps use `dialog --progressbox`; the plain UI streams raw output.
+Optional package sets never abort the install: a failure records pacman's own
+`error:` line (key/signature errors refresh `archlinux-keyring` and retry once),
+and every warning is listed on the finish screen and in
+`/root/t14s-post-install.txt`. The full log is kept at
+`/var/log/t14s-install.log` (mode `0600`). Passwords enter chroot via a `0600`
 file (not env), then shred. UKI build fails if ESP free space is under 64 MB.
 `sbctl verify` must pass before enroll.
 

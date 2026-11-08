@@ -141,8 +141,8 @@ _pf_out="$(bash -c '
   eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
   LOG=/dev/null W=72
   { printf "Packages (2) a-1 b-1\n"
-    printf "  %% Total    %% Received %% Xferd\r 100 1M\n"
-    printf "  %% Total    %% Received %% Xferd\r 100 1M\n"
+    printf " a-1-x86_64.pkg.tar.zst downloading...\n"
+    printf " a-1-x86_64.pkg.tar.zst downloading...\n"
     printf "(1/2) checking keys in keyring\n(2/2) installing b\n(1/1) Updating initcpios...\n"
     printf "@@STAGE 34 72 GNOME\n(100/100) installing gnome-shell\n"
   } | progress_filter 0 100 gauge step | awk "p==\"XXX\" && /^[0-9]+\$/{print} {p=\$0}"
@@ -156,7 +156,7 @@ echo "ok progress_filter percents"
 _pf_edge="$(bash -c '
   eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
   LOG=/dev/null W=72
-  printf "Package (2)  New Version\n  %% Total    %% Received %% Xferd\n" \
+  printf "Package (2)  New Version\n b-1-any.pkg.tar.zst downloading...\n" \
     | progress_filter 0 100 gauge step "HINT-LINE" | tr "\n" "|"
   echo
   printf "@@STAGE 34 72 GNOME\nraw line\n" | progress_filter 0 100 text step
@@ -393,8 +393,118 @@ grep -qF 'cannot pick a timezone' "$ROOT/install.sh" \
 grep -q 'LUKS_WIPE' "$ROOT/install.sh" || fail "must offer optional LUKS mapper wipe"
 grep -q 'rc == 0 || rc == 1' "$ROOT/install.sh" || fail "LUKS wipe must treat dd exit 1 as success only"
 grep -q 'PACMAN_PARALLEL' "$ROOT/install.sh" || fail "must offer ParallelDownloads choice"
-grep -q '#\\?ParallelDownloads' "$ROOT/install.sh" \
-  || fail "chroot ParallelDownloads sed must match commented or live lines"
+# pacman_tune: behaviour on a stock-style pacman.conf (live ISO + target).
+_pt="$(mktemp)"
+cat >"$_pt" <<'CONF'
+[options]
+XferCommand = /usr/bin/curl -fL -C - -o %o %u
+#Color
+#VerbosePkgLists
+#ParallelDownloads = 5
+[core]
+Include = /etc/pacman.d/mirrorlist
+#[multilib-testing]
+#Include = /etc/pacman.d/mirrorlist
+#[multilib]
+#Include = /etc/pacman.d/mirrorlist
+CONF
+bash -c 'eval "$(sed -n "/^pacman_tune()/,/^}/p" "$1")"; pacman_tune "$2" 15 Y; pacman_tune "$2" 15 Y' \
+  _ "$ROOT/install.sh" "$_pt" || fail "pacman_tune failed"
+grep -q '^XferCommand' "$_pt" && fail "pacman_tune must drop XferCommand (serializes downloads)" || true
+grep -qx 'ParallelDownloads = 15' "$_pt" || fail "pacman_tune must set ParallelDownloads"
+for _k in Color ILoveCandy VerbosePkgLists DisableDownloadTimeout '\[multilib\]'; do
+  [[ $(grep -c "^${_k}\$" "$_pt") == 1 ]] || fail "pacman_tune: expected exactly one ${_k} (idempotent)"
+done
+grep -q '^#\[multilib-testing\]' "$_pt" || fail "pacman_tune must not enable [multilib-testing]"
+[[ $(grep -c '^Include' "$_pt") == 2 ]] || fail "pacman_tune: only [multilib] Include uncommented"
+rm -f "$_pt"; unset -v _pt _k
+grep -qE '^[^#]*XferCommand = ' "$ROOT/install.sh" \
+  && fail "installer must not add an XferCommand" || true
+grep -q 'declare -f pacman_tune >/mnt/root/t14s-lib.sh' "$ROOT/install.sh" \
+  || fail "chroot must reuse host pacman_tune (no duplicate body)"
+echo "ok pacman_tune"
+
+# Chroot pkg_try: failure records pacman's own error line; key errors refresh
+# archlinux-keyring and retry once. Stub pacman on PATH.
+_pk="$(mktemp -d)"
+mkdir -p "$_pk/bin"
+cat >"$_pk/bin/pacman" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$PK_DIR/calls"
+# Real pacman prints this on every install attempt (success or not).
+echo "(1/1) checking keys in keyring"
+case "$*" in
+  *archlinux-keyring*) touch "$PK_DIR/refreshed"; exit 0 ;;
+  *keyfail*) [[ -f $PK_DIR/refreshed ]] && exit 0
+             echo "error: keyfail: signature from \"X\" is unknown trust"; exit 1 ;;
+  *broken*) echo ":: downloading broken..."; echo "error: failed to commit transaction (conflicting files)"; exit 1 ;;
+  *keychain*) echo "error: target not found: keychain"; exit 1 ;;
+  *) exit 0 ;;
+esac
+STUB
+chmod +x "$_pk/bin/pacman"
+_chroot_body="$(awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;next} f&&/^CHROOT$/{exit} f' "$ROOT/install.sh")"
+PK_DIR="$_pk" PATH="$_pk/bin:$PATH" bash -c '
+  set -euo pipefail
+  eval "$(printf "%s\n" "$1" | awk "/^WARN_FILE=/{f=1} f; /^source \\/root\\/t14s-lib.sh/{exit}" | grep -v "^source ")"
+  WARN_FILE=$2/warn
+  # Key case first: its refresh must be the ONLY keyring call; a later
+  # non-key failure must not trigger another one.
+  pkg_try "Key set" keyfail >/dev/null || exit 22
+  pkg_try "Broken set" broken >/dev/null && exit 21
+  pkg_try "Name with key" keychain >/dev/null && exit 24
+  pkg_try "Fine set" fine >/dev/null || exit 23
+' _ "$_chroot_body" "$_pk" || fail "pkg_try behaviour wrong (rc=$?)"
+grep -qx 'Broken set install failed (pacman exit 1): error: failed to commit transaction (conflicting files)' "$_pk/warn" \
+  || fail "pkg_try must record pacman's error line: $(cat "$_pk/warn" 2>/dev/null)"
+grep -q 'archlinux-keyring' "$_pk/calls" || fail "pkg_try must refresh archlinux-keyring on key errors"
+grep -q 'Key set' "$_pk/warn" && fail "key error fixed by refresh must not warn" || true
+[[ $(grep -c 'archlinux-keyring' "$_pk/calls") == 1 ]] \
+  || fail "only the key error may trigger a keyring refresh (not 'checking keys in keyring' noise)"
+grep -qx -- '-Su --noconfirm' "$_pk/calls" || fail "keyring refresh must be followed by -Su (no partial upgrade)"
+rm -rf "$_pk"; unset -v _pk _chroot_body
+echo "ok pkg_try"
+
+# New option flags are wired end to end (answers, canonicalize, chroot env).
+for _fl in INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT; do
+  python3 - "$ROOT/install.sh" "$_fl" <<'PY' || fail "flag $_fl not wired everywhere"
+import re, sys
+t = open(sys.argv[1]).read(); f = sys.argv[2]
+keys = t[t.index('ANSWERS_KEYS=('):t.index(')', t.index('ANSWERS_KEYS=('))]
+assert f in keys.split(), 'ANSWERS_KEYS'
+canon = t[t.index('for _flag in DESKTOP'):t.index('do', t.index('for _flag in DESKTOP'))]
+assert f in canon.split(), 'yn_canon loop'
+env = t[t.index('arch-chroot /mnt env'):t.index('bash /root/chroot-setup.sh', t.index('arch-chroot /mnt env'))]
+assert f'{f}="${f}"' in env, 'chroot env'
+assert f'${{{f}:=N}}' in t, 'default'
+PY
+done
+unset -v _fl
+grep -q 'tuned tuned-ppd' "$ROOT/install.sh" || fail "GNOME + tuned must install tuned-ppd (replaces PPD)"
+grep -q 'tlp conflicts with tuned' "$ROOT/install.sh" || fail "tuned must force TLP off"
+grep -q 'runuser -u "$USERNAME" -- git clone --depth 1 https://aur.archlinux.org/yay-bin.git' "$ROOT/install.sh" \
+  || fail "yay must be built as the user (makepkg refuses root)"
+grep -vE '^\s*#' "$ROOT/install.sh" | grep -q 'NOPASSWD' \
+  && fail "installer must not grant sudoers NOPASSWD" || true
+grep -q 'rtkit evolution-data-server' "$ROOT/install.sh" || fail "GNOME needs rtkit + evolution-data-server"
+grep -q '^  wireless-regdb$' "$ROOT/install.sh" || fail "base needs wireless-regdb (regulatory.db)"
+grep -q 'install -m 600 "$LOG" /mnt/var/log/t14s-install.log' "$ROOT/install.sh" \
+  || fail "install log must be kept on the target"
+grep -q 'INSTALL COMPLETE with warnings' "$ROOT/install.sh" || fail "finish screen must surface warnings"
+echo "ok option wiring"
+
+# No full-screen colour flashes: one backdrop for every severity; newt
+# overlays never recolour root/window.
+python3 - "$ROOT/install.sh" <<'PY' || fail "TUI backdrop must be constant across severities"
+import re, sys
+t = open(sys.argv[1]).read()
+assert t.count('screen_color = $screen') == 1
+assert "local screen='(CYAN,BLUE,ON)'" in t
+for blk in re.findall(r"^NEWT_COLORS_(?!BASE)[A-Z]+='\n(.*?)\n'", t, re.S | re.M):
+    for ln in blk.splitlines():
+        assert ln.split('=')[0] in ('border', 'title'), ln
+print('ok constant TUI backdrop')
+PY
 grep -q 'skip_reflector' "$ROOT/install.sh" || fail "checklist must offer skip reflector"
 grep -q 'INSTALL_CUPS' "$ROOT/install.sh" || fail "must offer archdi-style CUPS option"
 grep -q 'nerd_fonts' "$ROOT/install.sh" || fail "checklist must offer nerd_fonts"
@@ -585,6 +695,12 @@ grep -q 'flatpak install --user' "$ROOT/README.md" \
 grep -q 'Setup Mode' "$ROOT/README.md" || fail "README SB enroll must mention Setup Mode"
 grep -q 'FORMAT_EFI=1' "$ROOT/README.md" || fail "README must note CLEAN_ESP ignored when formatting"
 grep -q 'dead entries' "$ROOT/install.sh" || fail "CLEAN_ESP_ARCH=N must warn about dead boot entries"
+# umask must not leak into arch-chroot (regression: /etc/locale.conf 0600 → LANG unset).
+awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1} f&&/^CHROOT$/{f=0;next} !f' "$ROOT/install.sh" \
+  | grep -qE '^umask ' && fail "script-wide umask leaks into arch-chroot; scope it in a subshell" || true
+awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;n=0} f{n++} f&&n<=6' "$ROOT/install.sh" \
+  | grep -qx 'umask 022' || fail "chroot script must pin umask 022"
+grep -q 'fmask=0077' "$ROOT/install.sh" || fail "ESP fstab must use fmask/dmask=0077 (random-seed)"
 # Chroot must not delete pacstrap's kernels/ucode before mkinitcpio -P
 # (regression: "'/boot/vmlinuz-linux-lts' must be readable").
 awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1} f&&/^mkinitcpio -P/{exit} f' "$ROOT/install.sh" \

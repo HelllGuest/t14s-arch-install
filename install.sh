@@ -155,7 +155,8 @@ _tui_btns() {
 #   * backgrounds only from the 8 normal colours (newt: no bright*/yellow/white bg);
 #   * one focus colour everywhere: bright WHITE on BLUE;
 #   * newt uses S-Lang names (yellow = bright, brown = dim; no "brightyellow").
-# Severity overlays are appended to NEWT_COLORS_BASE in tui() (later keys win).
+# Severity overlays are appended to NEWT_COLORS_BASE in tui() (later keys win)
+# and only touch border/title — never root/window — so screens don't flash.
 NEWT_COLORS_BASE='
 root=white,blue
 roottext=brightcyan,blue
@@ -187,33 +188,29 @@ border=brightcyan,black
 title=brightcyan,black
 '
 NEWT_COLORS_WARN='
-root=yellow,black
 border=yellow,black
 title=yellow,black
 '
 NEWT_COLORS_ERROR='
-root=white,red
 border=brightred,black
 title=white,red
 '
 NEWT_COLORS_CRITICAL='
-root=yellow,red
 border=yellow,red
-window=yellow,red
 title=yellow,red
-textbox=yellow,red
 '
 NEWT_COLORS_OK='
-root=white,green
 border=brightgreen,black
 title=brightgreen,black
 '
 
-# Write one dialogrc: $1 path, then screen/title/border colours. Severity only
-# changes the frame; focus is always bright WHITE on BLUE and BLACK text is never
-# bold (see palette rules above).
+# Write one dialogrc: $1 path, $2 title colour, $3 border colour. The backdrop
+# (screen_color) is the same for every severity so moving between screens never
+# flashes the whole terminal; severity only recolours the frame + title. Focus
+# is always bright WHITE on BLUE and BLACK text is never bold (rules above).
 _write_one_dialogrc() {
-  local path=$1 screen=$2 title=$3 border=$4
+  local path=$1 title=$2 border=$3
+  local screen='(CYAN,BLUE,ON)'
   local focus='(WHITE,BLUE,ON)'
   cat >"$path" <<EOF
 # T14s installer theme
@@ -271,17 +268,17 @@ write_dialogrc() {
   DIALOG_RC_CRITICAL="$base/critical"
   DIALOG_RC_OK="$base/ok"
   _write_one_dialogrc "$DIALOG_RC" \
-    '(CYAN,BLUE,ON)' '(YELLOW,BLACK,ON)' '(CYAN,BLACK,ON)'
+    '(YELLOW,BLACK,ON)' '(CYAN,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_INFO" \
-    '(CYAN,BLUE,ON)' '(CYAN,BLACK,ON)' '(CYAN,BLACK,ON)'
+    '(CYAN,BLACK,ON)' '(CYAN,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_WARN" \
-    '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)'
+    '(YELLOW,BLACK,ON)' '(YELLOW,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_ERROR" \
-    '(WHITE,RED,ON)' '(WHITE,RED,ON)' '(RED,BLACK,ON)'
+    '(WHITE,RED,ON)' '(RED,BLACK,ON)'
   _write_one_dialogrc "$DIALOG_RC_CRITICAL" \
-    '(YELLOW,RED,ON)' '(YELLOW,RED,ON)' '(YELLOW,RED,ON)'
+    '(YELLOW,RED,ON)' '(YELLOW,RED,ON)'
   _write_one_dialogrc "$DIALOG_RC_OK" \
-    '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)'
+    '(GREEN,BLACK,ON)' '(GREEN,BLACK,ON)'
   export DIALOGRC="$DIALOG_RC"
   export NEWT_COLORS="$NEWT_COLORS_BASE"
 }
@@ -813,7 +810,7 @@ log: $LOG" "$H" "$W"
 # $LOG. Signals understood:
 #   "@@STAGE lo hi text"   chroot stage marker: new band lo–hi %, caption text
 #   "Packages (N) …"       pacman transaction size ("Package (N)" with VerbosePkgLists)
-#   curl "% Total" header / " … downloading…"   one package download started
+#   " <file> downloading..."   pacman (no TTY): one file download started
 #   "( k/N) verb …"        pacman counters (keys/integrity/install/hooks)
 #   ">> text"              installer say() line → detail caption
 # pacman phases inside the current band: download 0–40 %, verify 40–50 %,
@@ -840,7 +837,7 @@ progress_filter() {
     elif [[ $clean =~ ^Packages?\ \(([0-9]+)\) ]]; then
       total=${BASH_REMATCH[1]} dl=0
       detail="resolving ${total} packages"
-    elif [[ $line == *"% Total"*"% Received"* || $clean == *" downloading..." ]]; then
+    elif [[ $clean == *" downloading..." ]]; then
       dl=$(( dl + 1 ))
       if (( total > 0 )); then
         (( dl > total )) && dl=$total
@@ -897,6 +894,32 @@ ${hint}" 14 "$W" "$lo"
   fi
   set -e
   return "$rc"
+}
+
+# Tune a pacman.conf in place (live ISO and target; shipped into the chroot via
+# declare -f). $1 conf, $2 ParallelDownloads, $3 Y = enable [multilib].
+#   * no XferCommand (it serializes downloads and ignores ParallelDownloads)
+#   * DisableDownloadTimeout (slow mirrors stall instead of aborting)
+#   * Color + ILoveCandy, VerbosePkgLists, CheckSpace
+pacman_tune() {
+  local conf=$1 par=${2:-10} multilib=${3:-N}
+  [[ -f $conf ]] || return 1
+  sed -i '/^XferCommand[[:space:]]*=/d' "$conf"
+  if grep -qE '^#?ParallelDownloads' "$conf"; then
+    sed -i -E "s/^#?ParallelDownloads.*/ParallelDownloads = ${par}/" "$conf"
+  else
+    sed -i "/^\\[options\\]/a ParallelDownloads = ${par}" "$conf"
+  fi
+  sed -i -E 's/^#(Color|VerbosePkgLists|CheckSpace)[[:space:]]*$/\1/' "$conf"
+  grep -q '^Color' "$conf" || sed -i '/^\[options\]/a Color' "$conf"
+  grep -q '^ILoveCandy' "$conf" || sed -i '/^Color/a ILoveCandy' "$conf"
+  grep -q '^DisableDownloadTimeout' "$conf" \
+    || sed -i '/^\[options\]/a DisableDownloadTimeout' "$conf"
+  if [[ $multilib == Y ]]; then
+    # Only [multilib] and its Include line — never [multilib-testing].
+    sed -i '/^#\[multilib\]$/{s/^#//;n;s/^#Include/Include/}' "$conf"
+  fi
+  return 0
 }
 
 bootstrap_ui() {
@@ -1207,6 +1230,7 @@ ANSWERS_KEYS=(
   INSTALL_VIRT INSTALL_AVAHI INSTALL_WIREGUARD INSTALL_TAILSCALE
   INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN
   INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST
+  INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT
   CLEAN_ESP_ARCH
   UFW_SYNCTHING UFW_KDECONNECT POST_HOOK_URL
   PACMAN_PARALLEL LUKS_WIPE HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME
@@ -1369,6 +1393,9 @@ case $PRESET in
     INSTALL_CLI=${INSTALL_CLI:-N}; INSTALL_PODMAN=${INSTALL_PODMAN:-N}
     INSTALL_STARSHIP=${INSTALL_STARSHIP:-N}; INSTALL_AVAHI=${INSTALL_AVAHI:-N}
     INSTALL_TLP=${INSTALL_TLP:-Y}; INSTALL_SELFTEST=${INSTALL_SELFTEST:-N}
+    INSTALL_MULTILIB=${INSTALL_MULTILIB:-N}; INSTALL_YAY=${INSTALL_YAY:-N}
+    INSTALL_TUNED=${INSTALL_TUNED:-N}; INSTALL_DEVTOOLS=${INSTALL_DEVTOOLS:-N}
+    INSTALL_BTRFS_ASSISTANT=${INSTALL_BTRFS_ASSISTANT:-N}
     ;;
   dev)
     DESKTOP=${DESKTOP:-Y}; INSTALL_NERD_FONTS=${INSTALL_NERD_FONTS:-Y}
@@ -1376,6 +1403,10 @@ case $PRESET in
     INSTALL_STARSHIP=${INSTALL_STARSHIP:-Y}; INSTALL_AVAHI=${INSTALL_AVAHI:-Y}
     INSTALL_CHROME_HINT=${INSTALL_CHROME_HINT:-Y}
     INSTALL_TLP=${INSTALL_TLP:-N}; INSTALL_SELFTEST=${INSTALL_SELFTEST:-Y}
+    INSTALL_MULTILIB=${INSTALL_MULTILIB:-Y}; INSTALL_YAY=${INSTALL_YAY:-Y}
+    INSTALL_TUNED=${INSTALL_TUNED:-Y}; INSTALL_DEVTOOLS=${INSTALL_DEVTOOLS:-Y}
+    INSTALL_BTRFS_ASSISTANT=${INSTALL_BTRFS_ASSISTANT:-Y}
+    INSTALL_SNAPPER_HOME=${INSTALL_SNAPPER_HOME:-Y}
     ;;
   *)
     PRESET=gnome
@@ -1383,6 +1414,9 @@ case $PRESET in
     INSTALL_CLI=${INSTALL_CLI:-N}; INSTALL_PODMAN=${INSTALL_PODMAN:-N}
     INSTALL_STARSHIP=${INSTALL_STARSHIP:-N}; INSTALL_AVAHI=${INSTALL_AVAHI:-Y}
     INSTALL_TLP=${INSTALL_TLP:-N}; INSTALL_SELFTEST=${INSTALL_SELFTEST:-Y}
+    INSTALL_MULTILIB=${INSTALL_MULTILIB:-Y}; INSTALL_YAY=${INSTALL_YAY:-Y}
+    INSTALL_TUNED=${INSTALL_TUNED:-Y}; INSTALL_DEVTOOLS=${INSTALL_DEVTOOLS:-N}
+    INSTALL_BTRFS_ASSISTANT=${INSTALL_BTRFS_ASSISTANT:-Y}
     ;;
 esac
 # Fill remaining flags with N if unset
@@ -1392,6 +1426,8 @@ esac
 : "${INSTALL_THINKFAN:=N}" "${UFW_SYNCTHING:=N}" "${UFW_KDECONNECT:=N}"
 : "${INSTALL_SNAPPER_HOME:=N}" "${INSTALL_LINUX_STABLE:=N}" "${INSTALL_PLYMOUTH:=N}"
 : "${INSTALL_SELFTEST:=N}" "${CLEAN_ESP_ARCH:=Y}"
+: "${INSTALL_MULTILIB:=N}" "${INSTALL_YAY:=N}" "${INSTALL_TUNED:=N}"
+: "${INSTALL_DEVTOOLS:=N}" "${INSTALL_BTRFS_ASSISTANT:=N}"
 : "${PACMAN_PARALLEL:=10}" "${LUKS_WIPE:=none}"
 : "${BTRFS_COMPRESS:=zstd3}" "${ZRAM_SIZE:=half}" "${REFLECTOR_COUNTRY:=}"
 : "${FORMAT_EFI:=1}"
@@ -1872,6 +1908,10 @@ else
     tlp "TLP power mgmt (console-only; skipped if GNOME)" "$(def_onoff "$INSTALL_TLP")" \
     thinkfan "Write thinkfan AUR note (not in official repos)" "$(def_onoff "$INSTALL_THINKFAN")" \
     snapper_home "Snapper config for @home" "$(def_onoff "$INSTALL_SNAPPER_HOME")" \
+    btrfs_assistant "btrfs-assistant (snapshot GUI; needs GNOME)" "$(def_onoff "$INSTALL_BTRFS_ASSISTANT")" \
+    tuned "tuned + tuned-ppd + tuned-gui (replaces power-profiles-daemon)" "$(def_onoff "$INSTALL_TUNED")" \
+    multilib "Enable [multilib] (32-bit: Steam, Wine)" "$(def_onoff "$INSTALL_MULTILIB")" \
+    yay "yay AUR helper (yay-bin, built as your user)" "$(def_onoff "$INSTALL_YAY")" \
     linux_stable "Also install linux (stable) UKI" "$(def_onoff "$INSTALL_LINUX_STABLE")" \
     plymouth "Plymouth splash (optional)" "$(def_onoff "$INSTALL_PLYMOUTH")" \
     selftest "Write post-boot BT/audio self-test script" "$(def_onoff "$INSTALL_SELFTEST")" \
@@ -1880,6 +1920,7 @@ else
     || die "aborted"
 
   OPTS_TOOLS="$(ui_checklist "Dev / CLI tools" \
+    devtools "Dev toolchains: gcc/clang/gdb, python, node, go, rustup, gh, nvim, code" "$(def_onoff "$INSTALL_DEVTOOLS")" \
     cli "ripgrep fd fzf bat eza jq git-delta" "$(def_onoff "$INSTALL_CLI")" \
     starship "starship prompt (+ wire into user zsh)" "$(def_onoff "$INSTALL_STARSHIP")" \
     podman "podman + buildah (rootless)" "$(def_onoff "$INSTALL_PODMAN")" \
@@ -1912,6 +1953,8 @@ else
   INSTALL_CUPS=N; SKIP_REFLECTOR=N; INSTALL_TLP=N; INSTALL_THINKFAN=N
   INSTALL_SNAPPER_HOME=N; INSTALL_LINUX_STABLE=N; INSTALL_PLYMOUTH=N
   INSTALL_SELFTEST=N; CLEAN_ESP_ARCH=N; INSTALL_CHROME_HINT=N
+  INSTALL_MULTILIB=N; INSTALL_YAY=N; INSTALL_TUNED=N; INSTALL_DEVTOOLS=N
+  INSTALL_BTRFS_ASSISTANT=N
   INSTALL_CLI=N; INSTALL_STARSHIP=N
   INSTALL_PODMAN=N; INSTALL_DOCKER=N; INSTALL_VIRT=N
   INSTALL_AVAHI=N; INSTALL_WIREGUARD=N; INSTALL_TAILSCALE=N
@@ -1934,7 +1977,12 @@ else
   flag_from_opts "$OPTS_CORE" selftest && INSTALL_SELFTEST=Y || true
   flag_from_opts "$OPTS_CORE" clean_esp && CLEAN_ESP_ARCH=Y || true
   flag_from_opts "$OPTS_CORE" chrome_hint && INSTALL_CHROME_HINT=Y || true
+  flag_from_opts "$OPTS_CORE" btrfs_assistant && INSTALL_BTRFS_ASSISTANT=Y || true
+  flag_from_opts "$OPTS_CORE" tuned && INSTALL_TUNED=Y || true
+  flag_from_opts "$OPTS_CORE" multilib && INSTALL_MULTILIB=Y || true
+  flag_from_opts "$OPTS_CORE" yay && INSTALL_YAY=Y || true
 
+  flag_from_opts "$OPTS_TOOLS" devtools && INSTALL_DEVTOOLS=Y || true
   flag_from_opts "$OPTS_TOOLS" cli && INSTALL_CLI=Y || true
   flag_from_opts "$OPTS_TOOLS" starship && INSTALL_STARSHIP=Y || true
   flag_from_opts "$OPTS_TOOLS" podman && INSTALL_PODMAN=Y || true
@@ -2004,10 +2052,19 @@ else
   unset -v HOOK_PRESET
 fi
 
-# TLP conflicts with GNOME power-profiles-daemon — force off when desktop on.
+# TLP conflicts with GNOME power-profiles-daemon and with tuned — force off.
 if yn_on "$DESKTOP" && yn_on "$INSTALL_TLP"; then
-  warn "TLP skipped — GNOME uses power-profiles-daemon"
+  warn "TLP skipped — GNOME uses power-profiles-daemon / tuned-ppd"
   INSTALL_TLP=N
+fi
+if yn_on "$INSTALL_TUNED" && yn_on "$INSTALL_TLP"; then
+  warn "TLP skipped — tuned selected (tlp conflicts with tuned)"
+  INSTALL_TLP=N
+fi
+# btrfs-assistant is a GUI (Qt) — only with the desktop.
+if yn_on "$INSTALL_BTRFS_ASSISTANT" && ! yn_on "$DESKTOP"; then
+  warn "btrfs-assistant skipped — no desktop (use snapper CLI)"
+  INSTALL_BTRFS_ASSISTANT=N
 fi
 # Re-apply VM/ThinkPad skip after checklist (thinkfan may have been re-enabled).
 if yn_on "$SKIP_THINKPAD_HW"; then
@@ -2056,7 +2113,7 @@ for _flag in DESKTOP INSTALL_NERD_FONTS ENROLL_SB ENABLE_SSHD INSTALL_CUPS \
   INSTALL_VIRT INSTALL_AVAHI INSTALL_WIREGUARD INSTALL_TAILSCALE \
   INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN \
   INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST \
-  CLEAN_ESP_ARCH \
+  CLEAN_ESP_ARCH INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT \
   UFW_SYNCTHING UFW_KDECONNECT SKIP_THINKPAD_HW
 do
   [[ -v $_flag ]] || printf -v "$_flag" '%s' N
@@ -2085,7 +2142,10 @@ _REVIEW="REVIEW — nothing has been written yet.
   Extra pkgs    $( ((${#EXTRA_PKGS[@]})) && printf '%s ' "${EXTRA_PKGS[@]}" || echo none)
   Desktop       $([[ $DESKTOP == Y ]] && echo 'minimal GNOME' || echo none)
   Nerd Fonts    $([[ $INSTALL_NERD_FONTS == Y ]] && echo curated set || echo no)
-  Snapper home  $INSTALL_SNAPPER_HOME
+  Snapper       home=$INSTALL_SNAPPER_HOME gui=$INSTALL_BTRFS_ASSISTANT
+  pacman/AUR    multilib=$INSTALL_MULTILIB yay=$INSTALL_YAY
+  Power         $([[ $INSTALL_TUNED == Y ]] && echo 'tuned + tuned-ppd' || echo power-profiles-daemon)
+  Dev tools     $INSTALL_DEVTOOLS
   linux/plymouth linux=$INSTALL_LINUX_STABLE plymouth=$INSTALL_PLYMOUTH
   CLI/Podman    cli=$INSTALL_CLI podman=$INSTALL_PODMAN docker=$INSTALL_DOCKER virt=$INSTALL_VIRT
   Net           avahi=$INSTALL_AVAHI wg=$INSTALL_WIREGUARD tailscale=$INSTALL_TAILSCALE
@@ -2230,20 +2290,13 @@ fi
 rm -f "$ML_TMP"
 unset -v _reflector_args
 
-# Robust downloads: route pacman through curl with retries + resume and NO
-# low-speed abort, so a slow mirror stalls but doesn't kill the transaction
-# (the default libcurl path aborts with "Operation too slow"). Failover across
-# the reflector mirrorlist still applies. Single pacstrap — no retry loop, which
-# would re-run on a partially-populated root and hit 'conflicting files'.
-if ! grep -q '^XferCommand' /etc/pacman.conf; then
-  sed -i '/^\[options\]/a XferCommand = /usr/bin/curl -fL -C - -o %o %u --retry 5 --retry-connrefused --connect-timeout 15' /etc/pacman.conf
-fi
-# Live ISO ParallelDownloads (archfi paralleldownloads).
-if grep -q '^#\?ParallelDownloads' /etc/pacman.conf; then
-  sed -i "s/^#\\?ParallelDownloads.*/ParallelDownloads = ${PACMAN_PARALLEL}/" /etc/pacman.conf
-else
-  sed -i "/^\\[options\\]/a ParallelDownloads = ${PACMAN_PARALLEL}" /etc/pacman.conf
-fi
+# Live ISO pacman (pacstrap uses this file). Built-in downloader only:
+# XferCommand makes pacman fetch one file at a time and ignore ParallelDownloads
+# (old runs of this script added a curl XferCommand — drop it on re-runs).
+# DisableDownloadTimeout keeps slow mirrors from aborting ("Operation too slow").
+# Single pacstrap — no retry loop, which would re-run on a partially-populated
+# root and hit 'conflicting files'.
+pacman_tune /etc/pacman.conf "$PACMAN_PARALLEL"
 
 BASE_PKGS=(
   base base-devel
@@ -2255,6 +2308,7 @@ BASE_PKGS=(
   reflector pacman-contrib
   mkinitcpio snapper snap-pac zram-generator
   apparmor ufw sbctl efibootmgr
+  wireless-regdb
   xdg-user-dirs
 )
 if yn_on "${INSTALL_LINUX_STABLE:-N}"; then
@@ -2283,6 +2337,9 @@ step "genfstab"
 genfstab -U /mnt >> /mnt/etc/fstab
 # add nofail to the /tmp line (failure must not block boot)
 sed -i -E '/[[:space:]]\/tmp[[:space:]]+btrfs/ s/(subvol=\/?@tmp)/\1,nofail/' /mnt/etc/fstab || true
+# ESP root-only: systemd-boot refuses a world-readable random-seed
+# ("Mount point '/boot' … is world accessible, which is a security hole").
+sed -i -E '/[[:space:]]\/boot[[:space:]]+vfat/ s/fmask=[0-7]+/fmask=0077/; /[[:space:]]\/boot[[:space:]]+vfat/ s/dmask=[0-7]+/dmask=0077/' /mnt/etc/fstab || true
 ok "base installed"
 
 # ── 7. chroot configuration ─────────────────────────────────
@@ -2290,12 +2347,45 @@ step "writing chroot config"
 cat > /mnt/root/chroot-setup.sh <<'CHROOT'
 #!/usr/bin/env bash
 set -euo pipefail
-say(){ printf '\e[1;34m>>\e[0m %s\n' "$*"; }
+# Files written here must be world-readable (locale.conf, dconf, sysctl.d…).
+umask 022
+# "WARN: …" lines are also collected for the host finish screen.
+WARN_FILE=/root/t14s-warnings.txt
+say(){
+  printf '\e[1;34m>>\e[0m %s\n' "$*"
+  if [[ $* == WARN:* ]]; then printf '%s\n' "${*#WARN: }" >>"$WARN_FILE"; fi
+  return 0
+}
 # Progress marker for the host gauge (progress_filter): stage <lo%> <hi%> <text>
 stage(){ printf '@@STAGE %s %s %s\n' "$1" "$2" "$3"; }
 yn_on() { local v=${1,,}; [[ $v == y || $v == yes || $v == on || $v == 1 ]]; }
+# Optional package set: install or record pacman's own error (not just "failed").
+# Usage: pkg_try "label" pkg…   → 0 on success, 1 after a WARN with the reason.
+pkg_try() {
+  local label=$1 out rc=0; shift
+  out=$(mktemp)
+  pacman -S --noconfirm --needed "$@" 2>&1 | tee "$out" || rc=${PIPESTATUS[0]}
+  # New packager keys can postdate the pacstrap keyring: refresh once, retry.
+  # Match pacman's error lines only — normal output always says "checking keys
+  # in keyring". Keyring sync is followed by -Su (never a bare -Sy install).
+  if (( rc != 0 )) && grep -qiE '^error:.*(signature|PGP|keyring|key "[^"]+")' "$out"; then
+    say "$label: pacman key/signature error — refreshing archlinux-keyring, retrying once"
+    rc=0
+    { pacman -Sy --noconfirm --needed archlinux-keyring \
+        && pacman -Su --noconfirm \
+        && pacman -S --noconfirm --needed "$@"; } 2>&1 | tee "$out" || rc=${PIPESTATUS[0]}
+  fi
+  if (( rc != 0 )); then
+    say "WARN: $label install failed (pacman exit $rc): $(grep -m1 -E '^error:' "$out" || tail -n1 "$out")"
+  fi
+  rm -f "$out"
+  return "$rc"
+}
+# Shared host helpers (pacman_tune) — written by the installer before arch-chroot.
+# shellcheck disable=SC1091
+source /root/t14s-lib.sh
 
-stage 0 4 "locale, time, hostname"
+stage 0 4 "locale, time, hostname, pacman"
 # time / locale / keymap
 if [[ $TIMEZONE == UTC ]]; then
   ln -sf /usr/share/zoneinfo/UTC /etc/localtime
@@ -2330,6 +2420,26 @@ else
 EOF
 fi
 unset -v _host_short
+
+# pacman before the UKI stage: a multilib -Syu that upgrades a kernel then
+# runs its mkinitcpio hook before our presets exist (no double UKI build).
+# pacman: parallel built-in downloader, no download timeout abort, Color/
+# ILoveCandy/VerbosePkgLists, optional [multilib] (same helper as the live ISO).
+PACMAN_PARALLEL="${PACMAN_PARALLEL:-10}"
+pacman_tune /etc/pacman.conf "$PACMAN_PARALLEL" "$(yn_on "${INSTALL_MULTILIB:-N}" && echo Y || echo N)"
+if yn_on "${INSTALL_MULTILIB:-N}"; then
+  # -Syu, never bare -Sy (partial upgrades); target is fresh so this is cheap.
+  pacman -Syu --noconfirm || say "WARN: could not sync [multilib] database"
+fi
+# makepkg (yay / AUR builds): all cores, no -debug split packages
+# (Arch default OPTIONS with debug → !debug; zstd is already -T0 upstream).
+mkdir -p /etc/makepkg.conf.d
+cat > /etc/makepkg.conf.d/t14s.conf <<'EOF'
+MAKEFLAGS="-j$(nproc)"
+OPTIONS=(strip docs !libtool !staticlibs emptydirs zipman purge !debug lto)
+EOF
+# Weekly cache trim (keeps 3 versions; pacman-contrib is in the base set).
+systemctl enable paccache.timer
 
 stage 4 6 "users and passwords"
 # users — secrets from /root/.t14s-install-secrets (0600; shredded after chroot)
@@ -2558,14 +2668,6 @@ grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null || sed -i 's/^ENABLED=.*/EN
   fi
 } > /etc/xdg/reflector/reflector.conf
 
-# pacman niceties (ParallelDownloads chosen in the installer wizard)
-PACMAN_PARALLEL="${PACMAN_PARALLEL:-10}"
-if grep -q '^#\?ParallelDownloads' /etc/pacman.conf; then
-  sed -i "s/^#Color/Color/; s/^#\\?ParallelDownloads.*/ParallelDownloads = ${PACMAN_PARALLEL}/" /etc/pacman.conf
-else
-  sed -i "s/^#Color/Color/" /etc/pacman.conf
-  sed -i "/^\\[options\\]/a ParallelDownloads = ${PACMAN_PARALLEL}" /etc/pacman.conf
-fi
 
 stage 30 34 "services and snapshots"
 # services
@@ -2578,6 +2680,13 @@ rmdir  /.snapshots 2>/dev/null || true
 if snapper --no-dbus -c root create-config /; then
   btrfs subvolume delete /.snapshots 2>/dev/null || true
   mkdir -p /.snapshots; mount -a || true; chmod 750 /.snapshots
+  # Bounded retention (defaults keep 10 hourly + 10 daily + 10 monthly + 10
+  # yearly); wheel may browse snapshots (btrfs-assistant, snapper list).
+  snapper --no-dbus -c root set-config \
+    TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 TIMELINE_LIMIT_WEEKLY=0 \
+    TIMELINE_LIMIT_MONTHLY=0 TIMELINE_LIMIT_YEARLY=0 NUMBER_LIMIT=10 \
+    ALLOW_GROUPS=wheel SYNC_ACL=yes \
+    || say "WARN: snapper root set-config failed — default retention kept"
   systemctl enable snapper-timeline.timer snapper-cleanup.timer
 else
   say "WARN: snapper create-config failed — skipping snapshots (configure post-boot)"
@@ -2586,13 +2695,17 @@ fi
 if yn_on "${INSTALL_SNAPPER_HOME}"; then
   say "snapper config for /home"
   if snapper --no-dbus -c home create-config /home; then
+    snapper --no-dbus -c home set-config \
+      TIMELINE_LIMIT_HOURLY=5 TIMELINE_LIMIT_DAILY=7 TIMELINE_LIMIT_WEEKLY=0 \
+      TIMELINE_LIMIT_MONTHLY=0 TIMELINE_LIMIT_YEARLY=0 ALLOW_GROUPS=wheel SYNC_ACL=yes \
+      || say "WARN: snapper home set-config failed — default retention kept"
     say "snapper home config created"
   else
     say "WARN: snapper home create-config failed — configure post-boot"
   fi
 fi
 
-stage 34 72 "GNOME desktop and Flatpaks"
+stage 34 72 "GNOME desktop, apps and Flatpaks"
 # minimal GNOME (optional)
 if yn_on "$DESKTOP"; then
   say "installing minimal GNOME + browsers + VPN + software center"
@@ -2607,39 +2720,64 @@ if yn_on "$DESKTOP"; then
     gnome-system-monitor gnome-calculator loupe evince gnome-disk-utility
     xdg-user-dirs-gtk xdg-desktop-portal xdg-desktop-portal-gnome polkit
     flatpak fwupd bolt pipewire pipewire-pulse wireplumber earlyoom
-    power-profiles-daemon
+    rtkit evolution-data-server
     sof-firmware alsa-ucm-conf
     mesa vulkan-radeon
     gnome-software
   )
+  # rtkit: realtime for PipeWire + gnome-shell KMS thread.
+  # evolution-data-server: gnome-shell CalendarServer (top-bar calendar).
+  # Power profiles: tuned + tuned-ppd (provides/conflicts power-profiles-daemon;
+  # GNOME's power menu talks to tuned-ppd; tuned ships tuned-gui) or plain PPD.
+  if yn_on "${INSTALL_TUNED}"; then
+    _gnome_pkgs+=(tuned tuned-ppd)
+    _power_units=(tuned.service tuned-ppd.service)
+  else
+    _gnome_pkgs+=(power-profiles-daemon)
+    _power_units=(power-profiles-daemon.service)
+  fi
+  if yn_on "${INSTALL_BTRFS_ASSISTANT}"; then
+    _gnome_pkgs+=(btrfs-assistant)
+  fi
   if ! yn_on "${SKIP_THINKPAD_HW}"; then
     _gnome_pkgs+=(fprintd)
   fi
-  if pacman -S --noconfirm --needed --disable-download-timeout "${_gnome_pkgs[@]}"
+  if pkg_try "GNOME desktop" "${_gnome_pkgs[@]}"
   then
     unset -v _gnome_pkgs
-    systemctl enable gdm bolt.service earlyoom.service power-profiles-daemon
+    systemctl enable gdm bolt.service earlyoom.service "${_power_units[@]}"
     mkdir -p /etc/gdm
     printf '[daemon]\nWaylandEnable=true\n' > /etc/gdm/custom.conf
     flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
     # Skip extra-data apps (Chrome) in chroot — bwrap userns refused; install post-boot:
     #   flatpak install --system -y flathub com.google.Chrome
+    # One flatpak transaction for all apps: shared runtimes resolve/download
+    # once (per-app installs repeated that work: ~13 min on the last T14s run).
+    # On failure fall back per app so one bad ref doesn't drop the rest.
+    stage 58 72 "Flatpak apps (browsers, VPN)"
+    _fp_apps=(com.brave.Browser app.zen_browser.zen io.gitlab.librewolf-community com.protonvpn.www)
     failed_fp=()
-    for app in com.brave.Browser app.zen_browser.zen \
-               io.gitlab.librewolf-community com.protonvpn.www; do
-      if ! flatpak install --system -y --noninteractive flathub "$app"; then
-        failed_fp+=("$app")
-        flatpak uninstall --system -y --noninteractive "$app" >/dev/null 2>&1 || true
-        flatpak info --system "$app" >/dev/null 2>&1 || rm -rf "/var/lib/flatpak/app/$app"
-      fi
-    done
+    if ! flatpak install --system -y --noninteractive flathub "${_fp_apps[@]}"; then
+      _i=0
+      for app in "${_fp_apps[@]}"; do
+        _i=$(( _i + 1 ))
+        flatpak info --system "$app" >/dev/null 2>&1 && continue
+        printf '(%d/%d) installing flatpak %s\n' "$_i" "${#_fp_apps[@]}" "$app"
+        if ! flatpak install --system -y --noninteractive flathub "$app"; then
+          failed_fp+=("$app")
+          flatpak uninstall --system -y --noninteractive "$app" >/dev/null 2>&1 || true
+          flatpak info --system "$app" >/dev/null 2>&1 || rm -rf "/var/lib/flatpak/app/$app"
+        fi
+      done
+    fi
+    unset -v _fp_apps _i
     if (( ${#failed_fp[@]} )); then
       say "WARN: flatpak install failed: ${failed_fp[*]}"
       say "      retry after first boot: flatpak install --system -y flathub <app>"
     fi
     # archdi-style X11/Wayland keymap from console KEYMAP.
     # Console map names ≠ XKB layout/variant; remap commons, else best-effort.
-    XKB_LAYOUT= XKB_VARIANT=
+    XKB_LAYOUT='' XKB_VARIANT=''
     case $KEYMAP in
       us|de|fr|es|it|ru) XKB_LAYOUT=$KEYMAP ;;
       uk) XKB_LAYOUT=gb ;;
@@ -2685,7 +2823,7 @@ stage 72 78 "fonts and GNOME defaults"
 # Curated Nerd Fonts + UI fonts (matches HelllGuest install-fonts.sh; not full group).
 if yn_on "${INSTALL_NERD_FONTS}"; then
   say "installing Nerd Fonts + Inter/Noto"
-  if pacman -S --noconfirm --needed --disable-download-timeout \
+  if pkg_try "Nerd Fonts" \
     ttf-jetbrains-mono-nerd ttf-meslo-nerd ttf-firacode-nerd \
     ttf-cascadia-mono-nerd ttf-cascadia-code-nerd ttf-hack-nerd \
     ttf-iosevka-nerd ttf-iosevkaterm-nerd ttf-victor-mono-nerd \
@@ -2695,8 +2833,6 @@ if yn_on "${INSTALL_NERD_FONTS}"; then
     inter-font noto-fonts noto-fonts-emoji
   then
     fc-cache -f >/dev/null 2>&1 || true
-  else
-    say "WARN: font install incomplete — retry post-boot from install-fonts.sh / pacman"
   fi
 fi
 
@@ -2736,24 +2872,21 @@ stage 78 92 "optional packages"
 # archdi print stack (optional)
 if yn_on "${INSTALL_CUPS}"; then
   say "installing CUPS printing stack"
-  if pacman -S --noconfirm --needed cups cups-pdf ghostscript; then
+  if pkg_try "CUPS" cups cups-pdf ghostscript; then
     systemctl enable cups.service
-  else
-    say "WARN: CUPS install failed — retry post-boot: pacman -S cups cups-pdf ghostscript"
   fi
 fi
 
 # CLI tools
 if yn_on "${INSTALL_CLI}"; then
   say "installing CLI tools (ripgrep fd fzf bat eza jq git-delta)"
-  pacman -S --noconfirm --needed ripgrep fd fzf bat eza jq git-delta \
-    || say "WARN: CLI tools incomplete"
+  pkg_try "CLI tools" ripgrep fd fzf bat eza jq git-delta || true
 fi
 
 # Starship
 if yn_on "${INSTALL_STARSHIP}"; then
   say "installing starship"
-  if pacman -S --noconfirm --needed starship; then
+  if pkg_try "starship" starship; then
     sudo -u "$USERNAME" mkdir -p "/home/$USERNAME/.config"
     sudo -u "$USERNAME" tee "/home/$USERNAME/.config/starship.toml" >/dev/null <<'S'
 # t14s default — customize after first boot
@@ -2764,47 +2897,45 @@ S
         | sudo -u "$USERNAME" tee -a "/home/$USERNAME/.zshrc" >/dev/null
     fi
     chown -R "$USERNAME:$USERNAME" "/home/$USERNAME/.config" "/home/$USERNAME/.zshrc"
-  else
-    say "WARN: starship install failed"
   fi
 fi
 
 # Podman
 if yn_on "${INSTALL_PODMAN}"; then
   say "installing podman + buildah"
-  pacman -S --noconfirm --needed podman buildah \
-    || say "WARN: podman install failed"
+  pkg_try "podman" podman buildah || true
 fi
 
 # Docker
 if yn_on "${INSTALL_DOCKER}"; then
   say "installing docker"
-  if pacman -S --noconfirm --needed docker docker-compose; then
+  if pkg_try "docker" docker docker-compose; then
     systemctl enable docker.service
     usermod -aG docker "$USERNAME" || true
-  else
-    say "WARN: docker install failed"
   fi
 fi
 
 # libvirt / qemu
 if yn_on "${INSTALL_VIRT}"; then
   say "installing libvirt + qemu + virt-manager"
-  if pacman -S --noconfirm --needed libvirt qemu-desktop virt-manager edk2-ovmf dnsmasq; then
+  if pkg_try "libvirt/qemu" libvirt qemu-desktop virt-manager edk2-ovmf dnsmasq; then
     systemctl enable libvirtd.service
     usermod -aG libvirt "$USERNAME" || true
-  else
-    say "WARN: virt stack install failed"
+  fi
+fi
+
+# tuned without GNOME (GNOME path installs tuned + tuned-ppd above).
+if yn_on "${INSTALL_TUNED}" && ! yn_on "$DESKTOP"; then
+  if pkg_try "tuned" tuned; then
+    systemctl enable tuned.service
   fi
 fi
 
 # TLP (console-only — desktop path already cleared INSTALL_TLP)
 if yn_on "${INSTALL_TLP}"; then
   say "installing TLP"
-  if pacman -S --noconfirm --needed tlp tlp-rdw; then
+  if pkg_try "TLP" tlp tlp-rdw; then
     systemctl enable tlp.service
-  else
-    say "WARN: TLP install failed"
   fi
 fi
 
@@ -2812,7 +2943,7 @@ fi
 if yn_on "${INSTALL_THINKFAN}"; then
   cat > /root/t14s-thinkfan.txt <<'TF'
 thinkfan is not in official Arch repos (AUR). After first boot with an AUR helper:
-  paru -S thinkfan
+  yay -S thinkfan
   # then configure /etc/thinkfan.conf for your T14s and:
   sudo systemctl enable --now thinkfan
 TF
@@ -2822,7 +2953,7 @@ fi
 # Avahi / mDNS
 if yn_on "${INSTALL_AVAHI}"; then
   say "installing avahi + nss-mdns"
-  if pacman -S --noconfirm --needed avahi nss-mdns; then
+  if pkg_try "avahi" avahi nss-mdns; then
     systemctl enable avahi-daemon.service
     # Ensure .local resolution (nss-mdns package may not patch hosts line alone).
     if [[ -f /etc/nsswitch.conf ]] \
@@ -2831,22 +2962,56 @@ if yn_on "${INSTALL_AVAHI}"; then
         /etc/nsswitch.conf \
         || say "WARN: could not patch nsswitch.conf for mdns_minimal"
     fi
-  else
-    say "WARN: avahi install failed"
   fi
 fi
 
 # WireGuard / Tailscale
 if yn_on "${INSTALL_WIREGUARD}"; then
-  pacman -S --noconfirm --needed wireguard-tools \
-    || say "WARN: wireguard-tools failed"
+  pkg_try "wireguard-tools" wireguard-tools || true
 fi
 if yn_on "${INSTALL_TAILSCALE}"; then
-  if pacman -S --noconfirm --needed tailscale; then
+  if pkg_try "tailscale" tailscale; then
     systemctl enable tailscaled.service
-  else
-    say "WARN: tailscale failed"
   fi
+fi
+
+# Developer tools (toolchains, debuggers, editors). rustup: run
+# `rustup default stable` after first login (per-user toolchain).
+if yn_on "${INSTALL_DEVTOOLS}"; then
+  say "installing developer tools"
+  _dev_pkgs=(
+    git-lfs github-cli lazygit neovim
+    python python-pip python-pipx nodejs npm go rustup
+    cmake ninja meson clang lldb gdb valgrind perf strace ltrace
+    shellcheck shfmt httpie man-db man-pages tealdeer
+  )
+  yn_on "$DESKTOP" && _dev_pkgs+=(code)
+  pkg_try "developer tools" "${_dev_pkgs[@]}" || true
+  unset -v _dev_pkgs
+fi
+
+# yay (AUR helper): build yay-bin as the new user, install with pacman -U as
+# root — makepkg refuses root, and no sudoers NOPASSWD change is needed.
+if yn_on "${INSTALL_YAY}"; then
+  say "building yay (AUR yay-bin)"
+  _yay_dir="/home/$USERNAME/.cache/t14s-yay"
+  rm -rf "$_yay_dir"
+  if pkg_try "yay build deps" git base-devel \
+    && runuser -u "$USERNAME" -- mkdir -p "/home/$USERNAME/.cache" \
+    && runuser -u "$USERNAME" -- git clone --depth 1 https://aur.archlinux.org/yay-bin.git "$_yay_dir" \
+    && runuser -u "$USERNAME" -- env HOME="/home/$USERNAME" \
+         bash -c 'cd "$1" && makepkg --noconfirm --nocheck' _ "$_yay_dir"; then
+    _yay_pkg=$(find "$_yay_dir" -maxdepth 1 -name 'yay-bin-[0-9]*.pkg.tar.*' ! -name '*.sig' | head -n1)
+    if [[ -n $_yay_pkg ]] && pacman -U --noconfirm --needed "$_yay_pkg"; then
+      say "yay installed ($(pacman -Q yay-bin 2>/dev/null || echo yay-bin))"
+    else
+      say "WARN: yay package build produced nothing installable — install post-boot from AUR yay-bin"
+    fi
+  else
+    say "WARN: yay build failed — after first boot: git clone https://aur.archlinux.org/yay-bin.git && cd yay-bin && makepkg -si"
+  fi
+  rm -rf "$_yay_dir"
+  unset -v _yay_dir _yay_pkg
 fi
 
 # UFW extras
@@ -2932,51 +3097,46 @@ unset -v _sb_ok
 
 if yn_on "${ENABLE_SSHD}"; then
   say "enabling OpenSSH (sshd + UFW 22/tcp)"
-  pacman -S --noconfirm --needed openssh
-  systemctl enable sshd
-  ufw allow 22/tcp comment 'ssh' || true
-  if yn_on "${INSTALL_FAIL2BAN}"; then
-    say "installing fail2ban"
-    if pacman -S --noconfirm --needed fail2ban; then
-      mkdir -p /etc/fail2ban/jail.d
-      cat > /etc/fail2ban/jail.d/sshd.local <<'FB'
-[sshd]
-enabled = true
-FB
-      systemctl enable fail2ban.service
-    else
-      say "WARN: fail2ban install failed"
-    fi
+  if pkg_try "openssh" openssh; then
+    systemctl enable sshd
+    ufw allow 22/tcp comment 'ssh' || true
   fi
-elif yn_on "${INSTALL_FAIL2BAN}"; then
-  say "fail2ban requested without sshd — installing anyway"
-  if pacman -S --noconfirm --needed fail2ban; then
+fi
+if yn_on "${INSTALL_FAIL2BAN}"; then
+  yn_on "${ENABLE_SSHD}" || say "fail2ban requested without sshd — installing anyway"
+  if pkg_try "fail2ban" fail2ban; then
     mkdir -p /etc/fail2ban/jail.d
     cat > /etc/fail2ban/jail.d/sshd.local <<'FB'
 [sshd]
 enabled = true
 FB
     systemctl enable fail2ban.service
-  else
-    say "WARN: fail2ban install failed"
   fi
 fi
 CHROOT
 
 # Passwords via 0600 file (not arch-chroot env — visible in /proc/*/environ).
-umask 077
-{
-  printf 'USERNAME=%q\n' "$USERNAME"
-  printf 'USER_PASS=%q\n' "$USER_PASS"
-  printf 'ROOT_PASS=%q\n' "$ROOT_PASS"
-} > /mnt/root/.t14s-install-secrets
+# umask 077 only in this subshell: a script-wide umask leaks into arch-chroot
+# and leaves /etc/locale.conf, sysctl.d, dconf … at 0600 (LANG unset for users).
+(
+  umask 077
+  {
+    printf 'USERNAME=%q\n' "$USERNAME"
+    printf 'USER_PASS=%q\n' "$USER_PASS"
+    printf 'ROOT_PASS=%q\n' "$ROOT_PASS"
+  } > /mnt/root/.t14s-install-secrets
+)
 chmod 600 /mnt/root/.t14s-install-secrets
 unset -v USER_PASS ROOT_PASS
 
 chmod +x /mnt/root/chroot-setup.sh
+# Host helpers the chroot reuses (single source: no duplicated function bodies).
+declare -f pacman_tune >/mnt/root/t14s-lib.sh
+rm -f /mnt/root/t14s-warnings.txt
 cleanup_chroot_secrets() {
   shred -u /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets 2>/dev/null \
     || rm -f /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets
+  rm -f /mnt/root/t14s-lib.sh
 }
 # Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
 if ! run_gauge "chroot config (UKIs, users, optional GNOME)" 0 100 \
@@ -2994,6 +3154,9 @@ if ! run_gauge "chroot config (UKIs, users, optional GNOME)" 0 100 \
     INSTALL_WIREGUARD="$INSTALL_WIREGUARD" INSTALL_TAILSCALE="$INSTALL_TAILSCALE" \
     INSTALL_FAIL2BAN="$INSTALL_FAIL2BAN" INSTALL_CHROME_HINT="$INSTALL_CHROME_HINT" \
     INSTALL_SNAPPER_HOME="$INSTALL_SNAPPER_HOME" \
+    INSTALL_MULTILIB="$INSTALL_MULTILIB" INSTALL_YAY="$INSTALL_YAY" \
+    INSTALL_TUNED="$INSTALL_TUNED" INSTALL_DEVTOOLS="$INSTALL_DEVTOOLS" \
+    INSTALL_BTRFS_ASSISTANT="$INSTALL_BTRFS_ASSISTANT" \
     INSTALL_LINUX_STABLE="$INSTALL_LINUX_STABLE" INSTALL_PLYMOUTH="$INSTALL_PLYMOUTH" \
     INSTALL_SELFTEST="$INSTALL_SELFTEST" CLEAN_ESP_ARCH="$CLEAN_ESP_ARCH" \
     ZRAM_SIZE="$ZRAM_SIZE" REFLECTOR_COUNTRY="$REFLECTOR_COUNTRY" \
@@ -3006,6 +3169,26 @@ then
 fi
 cleanup_chroot_secrets
 ok "chroot config complete"
+
+# Backstop for the umask regression: these must be world-readable or users get
+# LANG unset / "dconf … Unable to open /etc/dconf/profile/user: Permission denied".
+for _f in etc/locale.conf etc/vconsole.conf etc/hostname etc/hosts etc/kernel/cmdline \
+          etc/pacman.conf etc/makepkg.conf.d/t14s.conf etc/dconf/profile/user etc/dconf/db/local \
+          etc/sysctl.d/99-security.conf etc/systemd/zram-generator.conf; do
+  [[ -e /mnt/$_f ]] || continue
+  if [[ $(( 8#$(stat -c '%a' "/mnt/$_f") & 8#004 )) -eq 0 ]]; then
+    chmod a+r "/mnt/$_f"
+    warn "fixed permissions on /$_f (was not world-readable)"
+    printf 'fixed permissions on /%s (was not world-readable)\n' "$_f" >>/mnt/root/t14s-warnings.txt
+  fi
+done
+unset -v _f
+
+# Collected chroot warnings → finish screen + /root/t14s-post-install.txt.
+INSTALL_WARNINGS=""
+if [[ -s /mnt/root/t14s-warnings.txt ]]; then
+  INSTALL_WARNINGS=$(sort -u /mnt/root/t14s-warnings.txt)
+fi
 
 # Persist answers + optional post-install hook (dotfiles bootstrap URL).
 answers_save /mnt/root/t14s-answers.env || true
@@ -3063,6 +3246,18 @@ else
   SELFTEST_HINT="Self-test script not installed"
 fi
 
+# Optional hint lines (plain if/else: a failing $(…) inside POST_TXT="…"
+# would make the assignment return 1 under set -e).
+EXTRA_HINTS=""
+if yn_on "$INSTALL_YAY"; then
+  EXTRA_HINTS+="  AUR: yay -S <pkg>   (makepkg uses all cores; no -debug pkgs)
+"
+fi
+if yn_on "$INSTALL_DEVTOOLS"; then
+  EXTRA_HINTS+="  Rust: rustup default stable   (per-user toolchain)
+"
+fi
+
 POST_TXT="T14s install — next steps
 
   Reboot and remove the ISO:   reboot
@@ -3093,16 +3288,34 @@ POST_TXT="T14s install — next steps
   Charge thresholds (ThinkPad BAT* only; skip/absent on VM):
     cat /sys/class/power_supply/BAT0/charge_control_*_threshold
     (expect 70 / 80; oneshot thinkpad-charge-thresholds.service + tmpfiles)
+${EXTRA_HINTS}  Full install log: /var/log/t14s-install.log (root only)
   ${FLATPAK_HINT}"
+if [[ -n $INSTALL_WARNINGS ]]; then
+  POST_TXT+="
+
+  Warnings during install (details in /var/log/t14s-install.log):
+$(printf '%s\n' "$INSTALL_WARNINGS" | sed 's/^/    - /')"
+fi
 
 printf '%s\n' "$POST_TXT" > /mnt/root/t14s-post-install.txt
+rm -f /mnt/root/t14s-warnings.txt   # already merged into t14s-post-install.txt
 
 step "unmounting"
+# Keep the full log on the installed system (live /tmp is gone after reboot).
+# Passwords never reach it (secrets go via a 0600 file, not command output).
+install -m 600 "$LOG" /mnt/var/log/t14s-install.log 2>/dev/null \
+  || warn "could not copy install log to /var/log/t14s-install.log"
 umount -R /mnt
 cryptsetup close cryptroot
 stop_log
 
-ui_ok "INSTALL COMPLETE — reboot and remove the ISO.
+if [[ -n $INSTALL_WARNINGS ]]; then
+  ui_warn "INSTALL COMPLETE with warnings — reboot and remove the ISO.
 
 $(printf '%s' "$POST_TXT")"
+else
+  ui_ok "INSTALL COMPLETE — reboot and remove the ISO.
+
+$(printf '%s' "$POST_TXT")"
+fi
 ok "done — reboot when ready"
