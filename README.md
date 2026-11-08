@@ -147,6 +147,8 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Stale Arch UKIs / `arch*.conf` / `EFI/arch` (when `CLEAN_ESP_ARCH=Y`) | Avoid dual Arch boots; free ESP |
 | `/root/.t14s-install-secrets` + chroot script shredded | Passwords not left on disk |
 | Chrome Flatpak **not** installed in chroot | bwrap userns fails in chroot |
+| Flatpak apps **not** downloaded in chroot | First-boot `t14s-flatpak-apps.service` installs them (~11 min of runtime downloads off the installer) |
+| snap-pac snapshots during install (`SNAP_PAC_SKIP=y`) | snapper can't run in the chroot (`fatal library error, lookup self`); snapshots start after first boot |
 
 ---
 
@@ -322,9 +324,21 @@ cat /sys/class/power_supply/BAT0/charge_control_start_threshold  # 70
 cat /sys/class/power_supply/BAT0/charge_control_end_threshold    # 80
 systemctl status thinkpad-charge-thresholds.service --no-pager
 t14s-selftest   # if that option was enabled
+journalctl -u t14s-flatpak-apps -f   # GNOME: browsers/VPN install once online
+tuned-adm active                     # if tuned chosen (GNOME power menu → tuned-ppd)
+sudo less /var/log/t14s-install.log  # full installer log
 ```
 
-Same notes land in `/root/t14s-post-install.txt`.
+Same notes (plus any install warnings) land in `/root/t14s-post-install.txt`.
+
+* **Flatpak apps (GNOME):** `t14s-flatpak-apps.service` runs after
+  `network-online.target`. First boot usually has no saved Wi-Fi (the ISO
+  connection is not copied) — connect, and it retries every 5 min until all
+  apps are installed, then stamps `/var/lib/t14s/flatpak-apps.done` and never
+  runs again. Re-run manually: `sudo rm /var/lib/t14s/flatpak-apps.done &&
+  sudo systemctl start t14s-flatpak-apps`.
+* **yay:** `yay -S <pkg>` (AUR); builds use all cores, no `-debug` packages.
+* **Dev tools:** `rustup default stable` once per user.
 
 * **GNOME:** GDM Wayland. Chrome helper (if enabled) uses
   `flatpak install --user -y flathub com.google.Chrome`
