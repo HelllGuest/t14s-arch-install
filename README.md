@@ -335,8 +335,9 @@ sudo less /var/log/t14s-install.log  # full installer log
 
 Same notes (plus any install warnings) land in `/root/t14s-post-install.txt`.
 
-* **Flatpak apps (GNOME):** `t14s-flatpak-apps.service` runs after
-  `network-online.target`. First boot usually has no saved Wi-Fi (the ISO
+* **Flatpak apps (GNOME):** `t14s-flatpak-apps.timer` starts
+  `t14s-flatpak-apps.service` 1 min after boot (after `network-online.target`),
+  so boot finishes without waiting for downloads. First boot usually has no saved Wi-Fi (the ISO
   connection is not copied) — connect, and it retries every 5 min until all
   apps are installed, then stamps `/var/lib/t14s/flatpak-apps.done` and never
   runs again. Re-run manually: `sudo rm /var/lib/t14s/flatpak-apps.done &&

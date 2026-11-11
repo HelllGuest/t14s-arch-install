@@ -350,14 +350,21 @@ msg_height() {
 }
 
 die() { # message [exit-code]
-  local msg=${1:-failed} rc=${2:-1}
+  local msg=${1:-failed} rc=${2:-1} was_logging=$LOGGING
   trap - ERR
+  # After start_log, stderr is the log file: record the error there, then
+  # restore the console so the operator actually sees why it stopped.
+  if (( LOGGING )); then
+    printf 'ERR %s\n' "$msg" >>"$LOG"
+    stop_log
+  fi
   printf '%sERR%s %s\n' "$cR" "$c0" "$msg" >&2
-  if [[ $UI != plain ]]; then
+  # Unattended runs must exit, not wait on a dialog nobody will answer.
+  if [[ $UI != plain ]] && (( ! NONINTERACTIVE )); then
     ui_critical "$msg
 
 Full log: $LOG" || true
-    if (( LOGGING )); then
+    if (( was_logging )); then
       { printf 'FAILED: %s\n\n--- last output ---\n' "$msg"
         tail -n "$H" "$LOG" 2>/dev/null; } >"$LOG.fail"
       TUI_TITLE="Failure log — $APP_TITLE"
@@ -446,9 +453,10 @@ ui_msg() {
       ;;
   esac
 
-  if [[ $UI == plain ]]; then
+  # NONINTERACTIVE: print and continue — no keypress or msgbox nobody answers.
+  if [[ $UI == plain ]] || (( NONINTERACTIVE )); then
     printf '\n%s[%s]%s\n%s\n' "$plain_c" "$badge" "$c0" "$folded" >&2
-    plain_pause
+    (( NONINTERACTIVE )) || plain_pause
     return 0
   fi
 
@@ -2993,13 +3001,24 @@ Restart=on-failure
 RestartSec=5min
 TimeoutStartSec=30min
 Nice=10
+FP
+    # Started by a timer, not WantedBy=multi-user.target: targets order After=
+    # the units they want, so a oneshot retrying until Wi-Fi exists would hold
+    # multi-user/graphical.target "starting" for the whole first boot.
+    cat > /etc/systemd/system/t14s-flatpak-apps.timer <<'FP'
+[Unit]
+Description=Start first-boot Flatpak app install (t14s-arch-install)
+ConditionPathExists=!/var/lib/t14s/flatpak-apps.done
+
+[Timer]
+OnBootSec=1min
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=timers.target
 FP
     # Explicit (NetworkManager's Also= enables it too) so network-online
     # really waits for NM on boot.
-    systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.service
+    systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.timer
     # archdi-style X11/Wayland keymap from console KEYMAP.
     # Console map names ≠ XKB layout/variant; remap commons, else best-effort.
     XKB_LAYOUT='' XKB_VARIANT=''
@@ -3285,8 +3304,9 @@ check_wifi() {
   nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
     || nmcli networking connectivity 2>/dev/null | grep -qi full
 }
+# `ufw status` needs root; this helper runs as the user (pipewire check).
 check_ufw() {
-  ufw status 2>/dev/null | grep -qi 'Status: active'
+  systemctl is-active --quiet ufw && grep -qx 'ENABLED=yes' /etc/ufw/ufw.conf
 }
 check bluetooth systemctl is-active --quiet bluetooth
 check pipewire check_pipewire

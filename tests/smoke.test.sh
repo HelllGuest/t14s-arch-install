@@ -566,8 +566,17 @@ grep -q 'INSTALL COMPLETE with warnings' "$ROOT/install.sh" || fail "finish scre
 _chr="$(awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;next} f&&/^CHROOT$/{exit} f' "$ROOT/install.sh")"
 grep -qE '^\s*flatpak install --system .*\$\{_fp_apps' <<<"$_chr" \
   && fail "chroot must not download Flatpak apps (first-boot service does)" || true
-grep -q 'systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.service' <<<"$_chr" \
-  || fail "first-boot flatpak service + wait-online must be enabled"
+grep -q 'systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.timer' <<<"$_chr" \
+  || fail "first-boot flatpak timer + wait-online must be enabled"
+# The retrying oneshot must not be WantedBy a target: targets order After= their
+# wants, so boot would stay "starting" until Flatpak downloads succeed (VM test).
+_fpsvc="$(awk '/cat > \/etc\/systemd\/system\/t14s-flatpak-apps.service/{f=1;next} f&&/^FP$/{exit} f' <<<"$_chr")"
+[[ -n $_fpsvc ]] || fail "could not extract t14s-flatpak-apps.service"
+! grep -qE '^\[Install\]|^WantedBy=' <<<"$_fpsvc" \
+  || fail "flatpak oneshot must not be WantedBy a target (start it from the timer)"
+_fptmr="$(awk '/cat > \/etc\/systemd\/system\/t14s-flatpak-apps.timer/{f=1;next} f&&/^FP$/{exit} f' <<<"$_chr")"
+grep -qx 'OnBootSec=1min' <<<"$_fptmr" && grep -qx 'WantedBy=timers.target' <<<"$_fptmr" \
+  || fail "flatpak timer must fire OnBootSec and be WantedBy timers.target"
 grep -q 'TimeoutStartSec=30min' <<<"$_chr" || fail "flatpak oneshot timeout must be 30min"
 grep -q 'ConditionPathExists=!/var/lib/t14s/flatpak-apps.done' <<<"$_chr" || fail "flatpak service must be one-shot (stamp)"
 grep -q 'Restart=on-failure' <<<"$_chr" || fail "flatpak service must retry until online"
@@ -1164,5 +1173,46 @@ grep -q 'for _bk in /boot/EFI/BOOT/BOOTX64.EFI /boot/loader/loader.conf; do' "$R
   || fail "ESP backup failure must be reported, not swallowed"
 grep -q 'firmware fallback loader) is replaced' "$ROOT/install.sh" \
   || fail "ESP reuse prompt must warn that BOOTX64.EFI and loader.conf change"
+
+# NONINTERACTIVE must never block on a keypress or msgbox (VM test: the final
+# "INSTALL COMPLETE" waited for [enter] forever with the target unmounted).
+_fns=""
+for _f in ui_fold ui_msg die start_log stop_log; do
+  _body="$(awk -v f="$_f" '$0 ~ "^"f"\\(\\) *\\{" {p=1} p{print} p&&/^}/{exit}' "$ROOT/install.sh")"
+  [[ -n $_body ]] || fail "could not extract $_f"
+  _fns+="$_body"$'\n'
+done
+_ui() { # UI NONINTERACTIVE -> prints PAUSED / TUI if the message would block
+  bash -c '
+    eval "$1"
+    plain_pause() { echo PAUSED; }; tui() { echo TUI; }
+    UI=$2 NONINTERACTIVE=$3 W=70 APP_TITLE=t cR= cG= cY= cB= cC= c0=
+    ui_msg ok "INSTALL COMPLETE" 2>/dev/null
+  ' _ "$_fns" "$1" "$2"
+}
+[[ -z $(_ui plain 1) ]] || fail "NONINTERACTIVE plain message must not pause"
+[[ -z $(_ui dialog 1) ]] || fail "NONINTERACTIVE dialog message must not open a msgbox"
+[[ $(_ui plain 0) == PAUSED ]] || fail "interactive plain message must still pause"
+# die after start_log: the error must reach the console AND the log.
+_tmp="$(mktemp -d)"
+_err="$(bash -c '
+  eval "$1"
+  cleanup_ui() { :; }; ui_critical() { echo CRIT; }; tui() { echo TUI; }
+  UI=plain NONINTERACTIVE=1 LOGGING=0 LOG=$2 cR= c0= H=20 W=70
+  start_log
+  die "boom-on-console" 3
+' _ "$_fns" "$_tmp/log" 2>&1 >/dev/null)" || true
+grep -q 'ERR boom-on-console' <<<"$_err" || fail "die after start_log must print the error on the console"
+grep -q 'ERR boom-on-console' "$_tmp/log" || fail "die after start_log must also record the error in the log"
+rm -rf "$_tmp"
+unset -f _ui
+
+# t14s-selftest runs as the user (pipewire check): `ufw status` needs root.
+_st="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<.ST.$/{f=1;next} f&&/^ST$/{exit} f' "$ROOT/install.sh")"
+[[ -n $_st ]] || fail "could not extract t14s-selftest"
+! grep -v '^[[:space:]]*#' <<<"$_st" | grep -q 'ufw status' \
+  || fail "selftest must not call root-only 'ufw status'"
+grep -q "systemctl is-active --quiet ufw && grep -qx 'ENABLED=yes' /etc/ufw/ufw.conf" <<<"$_st" \
+  || fail "selftest ufw check must use systemctl + ufw.conf"
 
 echo "PASS: smoke.test.sh"
