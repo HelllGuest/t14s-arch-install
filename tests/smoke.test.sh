@@ -8,6 +8,10 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 [[ -f "$ROOT/install.sh" ]] || fail "missing install.sh"
 [[ -x "$ROOT/install.sh" ]] || fail "install.sh not executable"
 bash -n "$ROOT/install.sh" || fail "bash -n failed"
+[[ -x "$ROOT/tests/host-check.sh" ]] && bash -n "$ROOT/tests/host-check.sh" \
+  || fail "tests/host-check.sh missing, not executable, or bash -n failed"
+! grep -qE '(^|[;&|[:space:]])(rm|mv|dd|mkfs|sgdisk|wipefs|tee|chmod|chown|sed -i|systemctl (start|stop|enable|disable|restart)) ' \
+  "$ROOT/tests/host-check.sh" || fail "host-check.sh must stay read-only"
 
 grep -q 'amd_iommu=on' "$ROOT/install.sh" || fail "missing amd_iommu=on"
 grep -q 'amd_pstate=active' "$ROOT/install.sh" || fail "missing amd_pstate=active"

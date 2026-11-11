@@ -329,6 +329,12 @@ cat /sys/class/power_supply/BAT0/charge_control_end_threshold    # 80
 systemctl status thinkpad-charge-thresholds.service --no-pager
 t14s-selftest   # if that option was enabled
 journalctl -u t14s-flatpak-apps -f   # GNOME: browsers/VPN install once online
+
+# Full read-only verification (~80 checks: cmdline, LUKS/Btrfs, AppArmor/UFW,
+# sysctl, charge/touchpad/lid, VA-API, GDM, makepkg, services). Exit 1 on FAIL.
+curl -fsSLO https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/main/tests/host-check.sh
+bash host-check.sh          # as your desktop user
+sudo bash host-check.sh     # adds /boot UKIs, LUKS PBKDF, sbctl, snapper
 tuned-adm active                     # if tuned chosen (GNOME power menu → tuned-ppd)
 sudo less /var/log/t14s-install.log  # full installer log
 ```
@@ -505,6 +511,7 @@ NONINTERACTIVE VM runs auto-set `SKIP_THINKPAD_HW=Y`.
 ```bash
 bash -n install.sh
 bash tests/smoke.test.sh
+bash tests/host-check.test.sh   # host-check.sh parsers (stubs, no host state)
 
 T14S_DRYRUN=1 bash install.sh
 T14S_UI=whiptail|dialog|plain bash install.sh

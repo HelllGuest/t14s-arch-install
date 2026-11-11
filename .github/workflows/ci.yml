@@ -16,8 +16,12 @@ jobs:
           sudo apt-get install -y -qq shellcheck dialog whiptail
       - name: Smoke
         run: bash tests/smoke.test.sh
+      - name: Host-check parsers
+        run: bash tests/host-check.test.sh
       - name: ShellCheck
-        run: shellcheck -S warning -e SC2015,SC2086,SC2162 install.sh
+        run: |
+          shellcheck -S warning -e SC2015,SC2086,SC2162 install.sh
+          shellcheck -S warning tests/host-check.sh tests/host-check.test.sh
       - name: TUI backend flags
         run: |
           dialog --help 2>&1 | grep -q -- '--yes-label'
