@@ -363,7 +363,8 @@ Full log: $LOG" || true
   cleanup_ui
   exit "$rc"
 }
-trap 'die "failed at line $LINENO" $?' ERR
+# BASH_COMMAND is the unexpanded source text, so "$LUKS_PASS" stays a name, not a value.
+trap 'die "failed at line $LINENO (exit $?): $BASH_COMMAND" $?' ERR
 trap 'cleanup_ui' EXIT
 
 # ── tty prompt primitives (plain fallback) ──────────────────
@@ -924,7 +925,10 @@ pacman_tune() {
 
 bootstrap_ui() {
   if [[ -n ${T14S_UI:-} ]]; then          # explicit override
-    UI=$T14S_UI
+    case $T14S_UI in
+      plain | dialog | whiptail) UI=$T14S_UI ;;
+      *) warn "T14S_UI=$T14S_UI unsupported (plain|dialog|whiptail); using plain"; UI=plain ;;
+    esac
     if [[ $UI != plain ]] && ! command -v "$UI" >/dev/null 2>&1; then
       (( DRYRUN )) || pacman -Sy --needed --noconfirm "$UI" >/dev/null 2>&1 || true
       command -v "$UI" >/dev/null 2>&1 || UI=plain
@@ -1060,6 +1064,10 @@ pick_part() {
     if [[ $(disk_type "$ans") != part ]]; then
       ui_error "$ans is a whole disk, not a partition."; continue
     fi
+    # Manual entry can name any disk; match the noninteractive part_on_disk check.
+    if ! part_on_disk "$ans" "$disk"; then
+      ui_error "$ans is not a partition on $disk."; continue
+    fi
     printf '%s' "$ans"; return 0
   done
 }
@@ -1160,6 +1168,9 @@ pick_timezone() {
 if (( ! DRYRUN )); then
   [[ $EUID -eq 0 ]] || die "run as root (from the Arch ISO)"
   [[ -d /sys/firmware/efi/efivars ]] || die "not booted in UEFI mode — enable UEFI and reboot the ISO"
+  # Leftover-state cleanup below disables all swap and unmounts /mnt: live ISO only.
+  [[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]] \
+    || die "not running from the Arch ISO (/run/archiso missing); set T14S_ALLOW_NON_ISO=1 to override"
   { ping -c1 -W3 archlinux.org || curl -fsS --max-time 6 https://archlinux.org; } >/dev/null 2>&1 \
     || die "no internet — connect first (iwctl / dhcp), then re-run"
   timedatectl set-ntp true || true
@@ -1250,7 +1261,7 @@ answers_load() {
     val=${line#*=}
     key=${key#"${key%%[![:space:]]*}"}
     key=${key%"${key##*[![:space:]]}"}
-    val=${val#$'\r'}
+    val=${val%$'\r'}  # CRLF files leave CR at the end
     # Strip one matching pair of surrounding quotes (hand-edited answers).
     if [[ $val == \"*\" ]]; then
       val=${val#\"}; val=${val%\"}
@@ -1305,7 +1316,7 @@ secrets_load() {
     val=${line#*=}
     key=${key#"${key%%[![:space:]]*}"}
     key=${key%"${key##*[![:space:]]}"}
-    val=${val#$'\r'}
+    val=${val%$'\r'}  # CRLF files leave CR at the end
     # Strip one matching pair of surrounding quotes (raw values preferred).
     if [[ $val == \"*\" ]]; then
       val=${val#\"}; val=${val%\"}
@@ -1324,7 +1335,7 @@ yn_on() {
   local v=${1,,}
   [[ $v == y || $v == yes || $v == on || $v == 1 ]]
 }
-def_onoff() { yn_on "$1" && printf on || printf off; }
+def_onoff() { if yn_on "$1"; then printf on; else printf off; fi; }
 # Canonicalize flag to Y or N (keeps chroot gates + answers consistent).
 yn_canon() {
   local -n _yc=$1
@@ -1455,14 +1466,16 @@ clean_esp_arch_files() {
 }
 # Replay checklist extras from answers (space-separated package names).
 if [[ -n ${EXTRA_PKGS_LIST:-} ]]; then
-  for _p in $EXTRA_PKGS_LIST; do
+  # read -a splits on whitespace without pathname expansion (a "*" stays literal).
+  read -r -a _pkgs <<<"$EXTRA_PKGS_LIST"
+  for _p in "${_pkgs[@]}"; do
     if [[ $_p =~ ^[a-z0-9][a-z0-9@._+-]*$ ]]; then
       EXTRA_PKGS+=("$_p")
     else
       warn "Ignoring invalid EXTRA_PKGS_LIST entry: $_p"
     fi
   done
-  unset -v _p
+  unset -v _p _pkgs
 fi
 
 # VM / non-ThinkPad rehearsal: skip BAT thresholds, fprintd, thinkfan notes.
@@ -2094,8 +2107,8 @@ else
   _extra_in=${T14S_EXTRA_PKGS:-}
 fi
 if [[ -n ${_extra_in// /} ]]; then
-  # shellcheck disable=SC2206
-  for _p in ${_extra_in}; do
+  read -r -a _pkgs <<<"$_extra_in"
+  for _p in "${_pkgs[@]}"; do
     if [[ $_p =~ ^[a-z0-9][a-z0-9@._+-]*$ ]]; then
       EXTRA_PKGS+=("$_p")
     else
@@ -2103,7 +2116,7 @@ if [[ -n ${_extra_in// /} ]]; then
     fi
   done
 fi
-unset -v _extra_in _p
+unset -v _extra_in _p _pkgs
 # Persist extras for answers replay (space-separated).
 EXTRA_PKGS_LIST="${EXTRA_PKGS[*]:-}"
 
@@ -2202,15 +2215,17 @@ LUKS_UUID="$(cryptsetup luksUUID "$ROOT_PART")"   # LUKS header UUID (for rd.luk
 ok "LUKS open as /dev/mapper/cryptroot (LUKS UUID=$LUKS_UUID)"
 
 # Optional full-volume wipe before mkfs (archfi normal/fast).
-# dd returns 1 at end-of-device (ENOSPC) — treat as success; other codes die.
+# count_bytes = exact device size, so dd exits 0 on a complete wipe and any
+# nonzero exit (EIO, short write) is a real failure, not end-of-device ENOSPC.
 _luks_wipe() {
   local desc=$1; shift
-  local rc=0
+  local rc=0 size
+  size=$(blockdev --getsize64 /dev/mapper/cryptroot) || die "LUKS wipe: cannot read cryptroot size"
   set +e
-  run_progress "$desc" "$@"
+  run_progress "$desc" "$@" iflag=count_bytes count="$size"
   rc=$?
   set -e
-  (( rc == 0 || rc == 1 )) || die "LUKS wipe failed (dd exit $rc)"
+  (( rc == 0 )) || die "LUKS wipe failed (dd exit $rc)"
 }
 case $LUKS_WIPE in
   fast)
@@ -3405,12 +3420,15 @@ if [[ -n ${POST_HOOK_URL:-} ]]; then
       warn "post-hook skipped in NONINTERACTIVE without T14S_POST_HOOK_I_UNDERSTAND=1"
     fi
   else
-    ui_yesno "Run post-install hook as root in the new system?
+    if ui_yesno "Run post-install hook as root in the new system?
 
 URL: $POST_HOOK_URL
 
-This downloads and executes remote code. Continue only if you trust the URL." no critical \
-      && _hook_ok=1 || warn "post-install hook skipped by operator"
+This downloads and executes remote code. Continue only if you trust the URL." no critical; then
+      _hook_ok=1
+    else
+      warn "post-install hook skipped by operator"
+    fi
   fi
   if (( _hook_ok )); then
     step "post-install hook: $POST_HOOK_URL"

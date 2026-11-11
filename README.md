@@ -179,7 +179,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HelllGuest/t14s-arch-install
 ```
 
 Prefer `bash <(curl …)` so menus keep a real TTY.
-UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whiptail|plain`.
+UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whiptail|plain` (any other value falls back to plain).
 
 ### Screens
 
@@ -479,6 +479,10 @@ Or dry-run menus only (no disk writes) from a normal shell:
 ```bash
 T14S_DRYRUN=1 bash install.sh
 ```
+
+Real runs refuse to start outside the Arch ISO (`/run/archiso` missing),
+because preflight cleanup runs `swapoff -a` and `umount -R /mnt`. Override with
+`T14S_ALLOW_NON_ISO=1` only on a disposable live environment.
 
 `T14S_DRYRUN=1` skips root/UEFI/network checks and does **not**
 `umount`/`swapoff`/`cryptsetup close`. Interactive dry runs still need a

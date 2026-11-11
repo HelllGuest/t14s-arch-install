@@ -463,7 +463,6 @@ grep -qF 'T14S_IDENTITY_OVERRIDES' "$ROOT/install.sh" \
 grep -qF 'cannot pick a timezone' "$ROOT/install.sh" \
   || fail "pick_timezone must not invent UTC when zoneinfo is missing"
 grep -q 'LUKS_WIPE' "$ROOT/install.sh" || fail "must offer optional LUKS mapper wipe"
-grep -q 'rc == 0 || rc == 1' "$ROOT/install.sh" || fail "LUKS wipe must treat dd exit 1 as success only"
 grep -q 'PACMAN_PARALLEL' "$ROOT/install.sh" || fail "must offer ParallelDownloads choice"
 # pacman_tune: behaviour on a stock-style pacman.conf (live ISO + target).
 _pt="$(mktemp)"
@@ -1067,5 +1066,43 @@ assert any('cryptsetup luksFormat' in x for x in after), \
     'piped cryptsetup luksFormat not detected after DRYRUN exit'
 print('ok DRYRUN exit before destructive phase')
 PY
+
+# ── safety / robustness regressions ─────────────────────────
+_pick="$(awk '/^pick_part\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
+grep -q 'part_on_disk "\$ans" "\$disk"' <<<"$_pick" \
+  || fail "pick_part must reject manual partitions on another disk"
+# ISO gate must sit in the non-DRYRUN preflight, before swapoff -a.
+_iso=$(grep -n '/run/archiso' "$ROOT/install.sh" | head -1 | cut -d: -f1)
+_swp=$(grep -n 'swapoff -a' "$ROOT/install.sh" | head -1 | cut -d: -f1)
+if [[ -z $_iso || -z $_swp ]] || (( _iso >= _swp )); then
+  fail "Arch ISO check must run before preflight swapoff/umount"
+fi
+grep -qF '[[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]]' "$ROOT/install.sh" \
+  || fail "preflight must require /run/archiso unless T14S_ALLOW_NON_ISO=1"
+grep -q 'iflag=count_bytes count="\$size"' "$ROOT/install.sh" \
+  || fail "LUKS wipe must bound dd to the device size"
+grep -q '(( rc == 0 )) || die "LUKS wipe failed' "$ROOT/install.sh" \
+  || fail "LUKS wipe must only accept dd exit 0"
+_tmp="$(mktemp -d)"
+dd if=/dev/zero of="$_tmp/w" bs=64M iflag=count_bytes count=1000000 status=none \
+  || fail "dd count_bytes wipe returned nonzero"
+[[ $(stat -c %s "$_tmp/w") == 1000000 ]] || fail "dd count_bytes wrote wrong size"
+# read -a must not glob: "*" stays literal even with files in cwd.
+touch "$_tmp/install.sh"
+( cd "$_tmp" && read -r -a _a <<<'htop * tmux' && [[ ${_a[*]} == 'htop * tmux' ]] ) \
+  || fail "package tokenizing must not pathname-expand"
+rm -rf "$_tmp"
+! grep -qE 'for _p in \$\{?(EXTRA_PKGS_LIST|_extra_in)' "$ROOT/install.sh" \
+  || fail "package lists must not use unquoted for-in splitting"
+[[ $(grep -cE 'read -r -a _pkgs <<<"\$(EXTRA_PKGS_LIST|_extra_in)"' "$ROOT/install.sh") -eq 2 ]] \
+  || fail "both package lists must tokenize with read -r -a"
+! grep -qF "val=\${val#\$'\\r'}" "$ROOT/install.sh" \
+  || fail "answers/secrets parsers must strip trailing CR, not leading"
+[[ $(grep -cF "val=\${val%\$'\\r'}" "$ROOT/install.sh") -eq 2 ]] \
+  || fail "both answers and secrets parsers must strip trailing CR"
+grep -q 'plain | dialog | whiptail) UI=\$T14S_UI' "$ROOT/install.sh" \
+  || fail "T14S_UI must be limited to plain|dialog|whiptail"
+grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$ROOT/install.sh" \
+  || fail "ERR trap must report the failed command"
 
 echo "PASS: smoke.test.sh"
