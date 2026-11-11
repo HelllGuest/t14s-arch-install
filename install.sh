@@ -2431,12 +2431,26 @@ if yn_on "${INSTALL_MULTILIB:-N}"; then
   # -Syu, never bare -Sy (partial upgrades); target is fresh so this is cheap.
   pacman -Syu --noconfirm || say "WARN: could not sync [multilib] database"
 fi
-# makepkg (yay / AUR builds): all cores, no -debug split packages
+# makepkg (yay / AUR builds): all cores, Zen 3+ x86-64-v3, no -debug split packages
 # (Arch default OPTIONS with debug → !debug; zstd is already -T0 upstream).
 mkdir -p /etc/makepkg.conf.d
 cat > /etc/makepkg.conf.d/t14s.conf <<'EOF'
+# Local/AUR builds: Zen 3+ Rembrandt (T14s Gen 3) is x86-64-v3 (AVX2/BMI2/FMA).
 MAKEFLAGS="-j$(nproc)"
 OPTIONS=(strip docs !libtool !staticlibs emptydirs zipman purge !debug lto)
+if [[ ${CFLAGS-} == *"-march=x86-64"* && ${CFLAGS-} != *"-march=x86-64-v"* ]]; then
+  CFLAGS="${CFLAGS/-march=x86-64/-march=x86-64-v3}"
+  CFLAGS="${CFLAGS/-mtune=generic /}"
+fi
+if [[ ${CXXFLAGS-} == *"-march=x86-64"* && ${CXXFLAGS-} != *"-march=x86-64-v"* ]]; then
+  CXXFLAGS="${CXXFLAGS/-march=x86-64/-march=x86-64-v3}"
+  CXXFLAGS="${CXXFLAGS/-mtune=generic /}"
+fi
+case "${RUSTFLAGS-} " in
+  *" -C target-cpu="* | *" target-cpu="*) ;;
+  *) RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-cpu=x86-64-v3" ;;
+esac
+GOAMD64="${GOAMD64:-v3}"
 EOF
 # Weekly cache trim (keeps 3 versions; pacman-contrib is in the base set).
 systemctl enable paccache.timer
@@ -2473,14 +2487,44 @@ fi
 printf '%s\n' "$_cmdline" > /etc/kernel/cmdline
 unset -v _cmdline
 
-# Charge window 70–80 — skipped on VM / SKIP_THINKPAD_HW.
-mkdir -p /etc/tmpfiles.d /usr/local/lib/thinkpad
+# systemd sleep: enforce s2idle (matches mem_sleep_default=s2idle on Rembrandt).
+mkdir -p /etc/systemd/sleep.conf.d
+cat > /etc/systemd/sleep.conf.d/s2idle.conf <<'EOF'
+[Sleep]
+SuspendState=mem
+MemorySleepMode=s2idle
+HibernateMode=shutdown
+EOF
+
+# Charge window 70–80, touchpad s2idle wakeup disable, lid policy — skipped on VM / SKIP_THINKPAD_HW.
+mkdir -p /etc/tmpfiles.d /usr/local/lib/thinkpad /etc/udev/rules.d /etc/systemd/logind.conf.d
 if ! yn_on "${SKIP_THINKPAD_HW}"; then
 cat > /etc/tmpfiles.d/thinkpad-charge-thresholds.conf <<'EOF'
 # ThinkPad charge thresholds 70–80 (PPD host; no TLP).
 # Best-effort at boot; see thinkpad-charge-thresholds.service if BAT* appears late.
 w /sys/class/power_supply/BAT0/charge_control_start_threshold - - - - 70
 w /sys/class/power_supply/BAT0/charge_control_end_threshold - - - - 80
+EOF
+cat > /etc/udev/rules.d/61-thinkpad-charge-limit.rules <<'EOF'
+# UPower 1.90+ / GNOME Preserve Battery Health:
+# 60-upower-battery.rules only imports CHARGE_LIMIT from hwdb if
+# charge_control_start_threshold already exists when BAT0 is added (races
+# thinkpad_acpi) and defaults to 75,80. Explicitly export CHARGE_LIMIT=70,80
+# on BAT* so upowerd writes 70-80 instead of clobbering start_threshold to 0.
+ACTION!="remove", SUBSYSTEM=="power_supply", KERNEL=="BAT*", ENV{CHARGE_LIMIT}="70,80"
+EOF
+cat > /etc/udev/rules.d/71-thinkpad-t14s-touchpad-wakeup.rules <<'EOF'
+# ThinkPad T14s Gen 3 AMD (21CQ/21CR): disable I2C touchpad wakeup from s2idle.
+# Prevents spurious wakeups when the lid flexes in transit (ArchWiki T14s Gen 3 AMD).
+# Matches both Elan (i2c-ELAN0678:00) and Synaptics (i2c-SYNA8018:00) SKUs.
+ACTION=="add|change", SUBSYSTEM=="i2c", KERNEL=="i2c-ELAN0678:*|i2c-SYNA8018:*", ATTR{power/wakeup}="disabled"
+EOF
+cat > /etc/systemd/logind.conf.d/thinkpad-lid.conf <<'EOF'
+[Login]
+# Battery / unknown: suspend on lid. On charger: stay awake (GNOME mirrors this).
+HandleLidSwitch=suspend
+HandleLidSwitchExternalPower=ignore
+HandleLidSwitchDocked=ignore
 EOF
 cat > /usr/local/lib/thinkpad/apply-charge-thresholds.sh <<'EOF'
 #!/usr/bin/env bash
@@ -2723,7 +2767,7 @@ if yn_on "$DESKTOP"; then
     flatpak fwupd bolt pipewire pipewire-pulse wireplumber earlyoom
     rtkit evolution-data-server
     sof-firmware alsa-ucm-conf
-    mesa vulkan-radeon
+    mesa vulkan-radeon libva-utils
     gnome-software
   )
   # rtkit: realtime for PipeWire + gnome-shell KMS thread.
@@ -2747,8 +2791,108 @@ if yn_on "$DESKTOP"; then
   then
     unset -v _gnome_pkgs
     systemctl enable gdm bolt.service earlyoom.service "${_power_units[@]}"
-    mkdir -p /etc/gdm
-    printf '[daemon]\nWaylandEnable=true\n' > /etc/gdm/custom.conf
+    mkdir -p /etc/gdm /etc/environment.d /etc/udev/rules.d /etc/systemd/system/gdm.service.d \
+      /etc/dconf/db/gdm.d /etc/dconf/profile
+    cat > /etc/gdm/custom.conf <<'EOF'
+[daemon]
+WaylandEnable=true
+AutomaticLoginEnable=false
+TimedLoginEnable=false
+
+[security]
+DisallowTCP=true
+
+[xdmcp]
+Enable=false
+EOF
+    printf '%s\n' 'user-db:user' 'system-db:gdm' 'file-db:/usr/share/gdm/greeter-dconf-defaults' \
+      > /etc/dconf/profile/gdm
+    # GDM greeter (not user session); compiled by the dconf update below.
+    cat > /etc/dconf/db/gdm.d/00-login-screen <<'EOF'
+[org/gnome/login-screen]
+disable-user-list=true
+banner-message-enable=false
+enable-fingerprint-authentication=true
+enable-smartcard-authentication=false
+
+[org/gnome/desktop/session]
+idle-delay=uint32 60
+
+[org/gnome/desktop/interface]
+clock-show-seconds=false
+clock-show-date=true
+clock-format='24h'
+color-scheme='prefer-dark'
+cursor-theme='Adwaita'
+cursor-size=24
+icon-theme='Adwaita'
+
+[org/gnome/desktop/background]
+picture-uri=''
+picture-uri-dark=''
+primary-color='#2b2e30'
+secondary-color='#2b2e30'
+color-shading-type='solid'
+picture-options='none'
+
+[org/gnome/desktop/screensaver]
+picture-uri=''
+primary-color='#2b2e30'
+color-shading-type='solid'
+picture-options='none'
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='blank'
+sleep-inactive-battery-timeout=180
+
+[org/gnome/desktop/a11y/applications]
+screen-keyboard-enabled=false
+screen-magnifier-enabled=false
+
+[org/gnome/mutter]
+experimental-features=['scale-monitor-framebuffer']
+EOF
+    # No fprintd on VM / SKIP_THINKPAD_HW: don't offer fingerprint at the greeter.
+    if yn_on "${SKIP_THINKPAD_HW}"; then
+      sed -i 's/^enable-fingerprint-authentication=true$/enable-fingerprint-authentication=false/' \
+        /etc/dconf/db/gdm.d/00-login-screen
+    fi
+    cat > /etc/environment.d/99-wayland.conf <<'EOF'
+# Wayland + VA-API defaults for GNOME Shell on AMD Radeon 680M (radeonsi)
+OZONE_PLATFORM=wayland
+MOZ_ENABLE_WAYLAND=1
+MOZ_DBUS_REMOTE=1
+QT_QPA_PLATFORM=wayland
+QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+ELECTRON_OZONE_PLATFORM_HINT=wayland
+SDL_VIDEODRIVER=wayland
+CLUTTER_BACKEND=wayland
+LIBVA_DRIVER_NAME=radeonsi
+EOF
+    cat > /etc/udev/rules.d/61-gdm-wayland.rules <<'EOF'
+# AMD Radeon 680M Rembrandt (1002:1681) — keep GDM on Wayland
+SUBSYSTEM=="drm", KERNEL=="card*", \
+  ATTRS{vendor}=="0x1002", ATTRS{device}=="0x1681", \
+  TAG+="seat", TAG+="uaccess", \
+  ENV{GDM_DISABLE_WAYLAND}=""
+
+SUBSYSTEM=="drm", KERNEL=="card*", \
+  ATTRS{vendor}=="0x1002", \
+  ENV{GDM_DISABLE_WAYLAND}=""
+EOF
+    cat > /etc/systemd/system/gdm.service.d/override.conf <<'EOF'
+# /etc/systemd/system/gdm.service.d/override.conf
+
+[Service]
+Environment=GDK_BACKEND=wayland
+Environment=CLUTTER_BACKEND=wayland
+Environment=QT_QPA_PLATFORM=wayland
+Environment=LIBVA_DRIVER_NAME=radeonsi
+OOMScoreAdjust=-500
+Restart=always
+RestartSec=1s
+EOF
     flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
     # Flatpak apps install on FIRST BOOT, not here: their runtimes (two
     # freedesktop versions + GL/codecs/locale + GNOME) are pure download and
@@ -2889,7 +3033,7 @@ monospace-font-name='JetBrainsMono Nerd Font Mono 11'
 font='JetBrainsMono Nerd Font Mono 12'
 DCONF
   fi
-  dconf update 2>/dev/null || true
+  dconf update || say "WARN: dconf update failed; GNOME/GDM dconf defaults not applied"
 fi
 
 stage 78 92 "optional packages"
@@ -3077,13 +3221,37 @@ check() {
   local name=$1; shift
   if "$@"; then echo "OK  $name"; ok=$((ok+1)); else echo "FAIL $name"; bad=$((bad+1)); fi
 }
+check_pipewire() {
+  systemctl --user is-active --quiet pipewire 2>/dev/null || pactl info >/dev/null 2>&1
+}
+check_wifi() {
+  nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
+    || nmcli networking connectivity 2>/dev/null | grep -qi full
+}
+check_ufw() {
+  ufw status 2>/dev/null | grep -qi 'Status: active'
+}
 check bluetooth systemctl is-active --quiet bluetooth
-check pipewire systemctl --user is-active --quiet pipewire 2>/dev/null \
-  || pactl info >/dev/null 2>&1
-check wifi nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
-  || nmcli networking connectivity 2>/dev/null | grep -qi full
+check pipewire check_pipewire
+check wifi check_wifi
 check apparmor systemctl is-active --quiet apparmor
-check ufw ufw status 2>/dev/null | grep -qi 'Status: active'
+check ufw check_ufw
+check mem_sleep grep -q '\[s2idle\]' /sys/power/mem_sleep
+if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver ]]; then
+  check amd_pstate grep -q '^amd-pstate' /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+fi
+if [[ -f /sys/class/power_supply/BAT0/charge_control_start_threshold ]]; then
+  check bat_start grep -qx '70' /sys/class/power_supply/BAT0/charge_control_start_threshold
+  check bat_end grep -qx '80' /sys/class/power_supply/BAT0/charge_control_end_threshold
+fi
+for _tp in /sys/bus/i2c/devices/i2c-ELAN0678:*/power/wakeup /sys/bus/i2c/devices/i2c-SYNA8018:*/power/wakeup; do
+  if [[ -f $_tp ]]; then
+    check touchpad_wakeup grep -qx 'disabled' "$_tp"
+  fi
+done
+if [[ -d /etc/dconf/db/gdm.d ]]; then
+  check gdm_dconf test -s /etc/dconf/db/gdm
+fi
 echo "t14s-selftest: $ok ok, $bad fail"
 (( bad == 0 ))
 ST
@@ -3200,8 +3368,16 @@ ok "chroot config complete"
 # Backstop for the umask regression: these must be world-readable or users get
 # LANG unset / "dconf … Unable to open /etc/dconf/profile/user: Permission denied".
 for _f in etc/locale.conf etc/vconsole.conf etc/hostname etc/hosts etc/kernel/cmdline \
-          etc/pacman.conf etc/makepkg.conf.d/t14s.conf etc/dconf/profile/user etc/dconf/db/local \
-          etc/sysctl.d/99-security.conf etc/systemd/zram-generator.conf; do
+          etc/pacman.conf etc/makepkg.conf.d/t14s.conf etc/dconf/profile/user \
+          etc/dconf/db/local etc/dconf/db/local.d/00-t14s etc/gdm/custom.conf \
+          etc/dconf/profile/gdm etc/dconf/db/gdm etc/dconf/db/gdm.d/00-login-screen \
+          etc/sysctl.d/99-security.conf etc/systemd/zram-generator.conf \
+          etc/tmpfiles.d/thinkpad-charge-thresholds.conf \
+          etc/systemd/sleep.conf.d/s2idle.conf etc/systemd/logind.conf.d/thinkpad-lid.conf \
+          etc/udev/rules.d/61-thinkpad-charge-limit.rules \
+          etc/udev/rules.d/71-thinkpad-t14s-touchpad-wakeup.rules \
+          etc/udev/rules.d/61-gdm-wayland.rules \
+          etc/environment.d/99-wayland.conf etc/systemd/system/gdm.service.d/override.conf; do
   [[ -e /mnt/$_f ]] || continue
   if [[ $(( 8#$(stat -c '%a' "/mnt/$_f") & 8#004 )) -eq 0 ]]; then
     chmod a+r "/mnt/$_f"
@@ -3270,7 +3446,7 @@ else
   SNAPPER_HINT="root config enabled; add home later: snapper -c home create-config /home"
 fi
 if yn_on "$INSTALL_SELFTEST"; then
-  SELFTEST_HINT="Self-test: /usr/local/bin/t14s-selftest (BT/audio/wifi/apparmor/ufw)"
+  SELFTEST_HINT="Self-test: /usr/local/bin/t14s-selftest (BT/audio/wifi/apparmor/ufw/s2idle/amd_pstate/BAT0/touchpad)"
 else
   SELFTEST_HINT="Self-test script not installed"
 fi

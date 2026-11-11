@@ -58,9 +58,13 @@ Pacstrapped into the new root every run:
 * Mount options: `compress=` from wizard (`zstd3` default)
 * Kernel cmdline: `rd.luks.name=…`, `amd_iommu=on`, `amd_pstate=active`,
   `mem_sleep_default=s2idle`, AppArmor
+* Sleep drop-in (`/etc/systemd/sleep.conf.d/s2idle.conf`): enforces `s2idle`
 * systemd-boot; UKIs under `/boot/EFI/Linux/`
 * Sysctl hardening (`99-security.conf` + Flatpak userns for hardened)
-* ThinkPad charge 70–80 (tmpfiles + oneshot) unless `SKIP_THINKPAD_HW=Y` (VMs)
+* ThinkPad hardware rules unless `SKIP_THINKPAD_HW=Y` (VMs):
+  * Charge window 70–80 (tmpfiles + oneshot + `/etc/udev/rules.d/61-thinkpad-charge-limit.rules` `CHARGE_LIMIT="70,80"` so UPower / GNOME Preserve Battery Health never resets `charge_control_start_threshold` to `0`)
+  * I2C touchpad `s2idle` wakeup disable (`/etc/udev/rules.d/71-thinkpad-t14s-touchpad-wakeup.rules` for `i2c-ELAN0678:*` / `i2c-SYNA8018:*`)
+  * Lid-switch policy (`/etc/systemd/logind.conf.d/thinkpad-lid.conf`: suspend on battery, ignore on AC/docked)
 
 ---
 
@@ -72,7 +76,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 
 | Toggle | Adds / does | Why |
 | ------ | ----------- | --- |
-| GNOME | Shell, GDM, portals, PipeWire + `rtkit`, `evolution-data-server` (top-bar calendar), Flatpak browsers/VPN installed by a first-boot service (`t14s-flatpak-apps`, retries every 5 min until online; ~11 min of downloads off the installer), `mesa`/`vulkan-radeon`, sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
+| GNOME | Shell, GDM, portals, PipeWire + `rtkit`, `evolution-data-server` (top-bar calendar), Flatpak browsers/VPN installed by a first-boot service (`t14s-flatpak-apps`, retries every 5 min until online; ~11 min of downloads off the installer), `mesa`/`vulkan-radeon`/`libva-utils`, Radeon 680M Wayland + VA-API (`LIBVA_DRIVER_NAME=radeonsi` in `/etc/environment.d/99-wayland.conf` and GDM override, plus `/etc/udev/rules.d/61-gdm-wayland.rules`), hardened `/etc/gdm/custom.conf` (`DisallowTCP`, XDMCP off, no auto/timed login) and greeter dconf (`/etc/dconf/db/gdm.d/00-login-screen`: hidden user list, 60 s idle), sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
 | Nerd Fonts | Curated `ttf-*-nerd` + Inter/Noto; GNOME mono font | Readable terminals / editors |
 | Enroll sbctl now | `sbctl enroll-keys -m` if Setup Mode **and** `sbctl verify` OK | Optional first-boot SB |
 | sshd | `openssh` + UFW 22/tcp | Remote rescue |
@@ -87,7 +91,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | yay | `yay-bin` built as your user, installed with `pacman -U` (no sudoers change) | AUR helper |
 | `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
 | Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
-| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW check |
+| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW / `s2idle` / `amd_pstate` / `BAT0` 70–80 / touchpad wakeup / compiled GDM dconf check |
 | Clean ESP Arch | Remove old Arch UKIs, `arch*.conf` entries, `EFI/arch` | Reinstall hygiene (default on). Kernels/ucode always cleared. Skips other vendors’ `EFI/*` dirs; does not delete `linux-*.conf` (may be non-Arch) |
 | Chrome helper | `~/install-chrome-flatpak.sh` | Chrome needs post-boot Flatpak userns |
 
@@ -127,7 +131,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Target `/etc/kernel/cmdline` | Rembrandt + LUKS + s2idle + AppArmor | One cmdline for all UKIs |
 | Target `/etc/fstab` | UUID mounts; `/tmp` gets `nofail` | Boot even if `@tmp` fails |
 | Target pacman / reflector.conf | Same `pacman.conf` tuning (+ `[multilib]` if chosen); weekly reflector; `paccache.timer` | Same mirror story post-boot; bounded cache |
-| Target `/etc/makepkg.conf.d/t14s.conf` | `MAKEFLAGS=-j$(nproc)`, `!debug` | Fast AUR builds, no `-debug` packages |
+| Target `/etc/makepkg.conf.d/t14s.conf` | `MAKEFLAGS=-j$(nproc)`, `!debug`, `lto`, Zen 3+ `x86-64-v3` (`CFLAGS`/`CXXFLAGS`/`RUSTFLAGS`/`GOAMD64=v3`) | Fast Rembrandt-tuned AUR/local builds, no `-debug` packages |
 | Target snapper configs | 5 hourly / 7 daily, `NUMBER_LIMIT=10`, `ALLOW_GROUPS=wheel` | Bounded snapshot space; GUI browse |
 | Target UFW | deny in / allow out; enabled | Firewall on first boot |
 | Target sudoers | `%wheel` enabled | User admin |

@@ -45,6 +45,78 @@ awk '
   || fail "ok target profile must only print on DMI match"
 grep -q 'vulkan-radeon' "$ROOT/install.sh" || fail "must pacstrap vulkan-radeon"
 grep -q 'mesa' "$ROOT/install.sh" || fail "must pacstrap mesa"
+grep -q 'libva-utils' "$ROOT/install.sh" || fail "must install libva-utils with GNOME"
+grep -q 'LIBVA_DRIVER_NAME=radeonsi' "$ROOT/install.sh" \
+  || fail "must configure LIBVA_DRIVER_NAME=radeonsi for Radeon 680M"
+! grep -q 'LIBVA_DRIVER_NAME=iHD' "$ROOT/install.sh" \
+  || fail "must not set Intel LIBVA_DRIVER_NAME=iHD on AMD T14s"
+grep -q '61-gdm-wayland.rules' "$ROOT/install.sh" \
+  || fail "must install 61-gdm-wayland.rules for AMD 0x1002/0x1681"
+# GDM hardening: check the actual heredoc bodies, not just any line in install.sh.
+_heredoc() { awk -v t="$1" 'index($0, "cat > " t " <<\x27EOF\x27"){f=1;next} f&&/^EOF$/{exit} f' "$ROOT/install.sh"; }
+_gdmconf="$(_heredoc /etc/gdm/custom.conf)"
+grep -qx 'DisallowTCP=true' <<<"$_gdmconf" || fail "gdm custom.conf must set DisallowTCP=true"
+grep -qx 'AutomaticLoginEnable=false' <<<"$_gdmconf" || fail "gdm custom.conf must disable autologin"
+awk '/^\[xdmcp\]/{s=1;next} /^\[/{s=0} s&&/^Enable=false$/{f=1} END{exit !f}' <<<"$_gdmconf" \
+  || fail "gdm custom.conf must disable XDMCP"
+_greeter="$(_heredoc /etc/dconf/db/gdm.d/00-login-screen)"
+grep -qx 'disable-user-list=true' <<<"$_greeter" || fail "GDM greeter dconf must hide the user list"
+# idle-delay is an org.gnome.desktop.session key; under login-screen it is ignored.
+awk '/^\[/{s=$0} /^idle-delay=/{print s}' <<<"$_greeter" | grep -qx '\[org/gnome/desktop/session\]' \
+  || fail "greeter idle-delay must live under [org/gnome/desktop/session]"
+grep -q 'enable-fingerprint-authentication=false' "$ROOT/install.sh" \
+  || fail "greeter fingerprint auth must be disabled on SKIP_THINKPAD_HW"
+if command -v dconf >/dev/null; then
+  _d="$(mktemp -d)"
+  printf '%s\n' "$_greeter" >"$_d/00"
+  dconf compile "$_d/db" "$_d" || fail "GDM greeter dconf keyfile must compile"
+  rm -rf "$_d"
+fi
+grep -q 'check gdm_dconf' "$ROOT/install.sh" || fail "t14s-selftest must check the compiled GDM dconf db"
+# The GDM block must sit inside the DESKTOP guard (headless installs have no gdm).
+awk '/^if yn_on "\$DESKTOP"; then$/{d=1} d&&/^fi$/{d=0} /cat > \/etc\/gdm\/custom\.conf/{print d+0; exit}' "$ROOT/install.sh" \
+  | grep -qx 1 || fail "GDM config must be written inside the DESKTOP guard"
+grep -q 'gdm.service.d/override.conf' "$ROOT/install.sh" \
+  || fail "must install GDM systemd override.conf"
+grep -q '99-wayland.conf' "$ROOT/install.sh" \
+  || fail "must install /etc/environment.d/99-wayland.conf"
+grep -q 'x86-64-v3' "$ROOT/install.sh" \
+  || fail "makepkg t14s.conf must tune for Zen 3+ x86-64-v3"
+grep -q 'GOAMD64="\${GOAMD64:-v3}"' "$ROOT/install.sh" \
+  || fail "makepkg t14s.conf must set GOAMD64=v3"
+grep -q 's2idle.conf' "$ROOT/install.sh" \
+  || fail "must install /etc/systemd/sleep.conf.d/s2idle.conf"
+grep -q 'thinkpad-lid.conf' "$ROOT/install.sh" \
+  || fail "must install /etc/systemd/logind.conf.d/thinkpad-lid.conf"
+grep -q '61-thinkpad-charge-limit.rules' "$ROOT/install.sh" \
+  || fail "must install 61-thinkpad-charge-limit.rules (UPower CHARGE_LIMIT=70,80)"
+grep -q 'ENV{CHARGE_LIMIT}="70,80"' "$ROOT/install.sh" \
+  || fail "61-thinkpad-charge-limit.rules must export CHARGE_LIMIT=70,80"
+grep -q '71-thinkpad-t14s-touchpad-wakeup.rules' "$ROOT/install.sh" \
+  || fail "must install 71-thinkpad-t14s-touchpad-wakeup.rules"
+grep -q 'i2c-ELAN0678:\*|i2c-SYNA8018:\*' "$ROOT/install.sh" \
+  || fail "touchpad wakeup rule must match ELAN0678 and SYNA8018"
+# Functional check: extract /etc/makepkg.conf.d/t14s.conf and /usr/local/bin/t14s-selftest
+_mkconf="$(awk '/^cat > \/etc\/makepkg\.conf\.d\/t14s\.conf <<\x27EOF\x27$/{f=1;next} f&&/^EOF$/{exit} f' "$ROOT/install.sh")"
+[[ -n $_mkconf ]] || fail "could not extract makepkg.conf.d/t14s.conf heredoc"
+bash -c '
+  set -euo pipefail
+  CFLAGS="-march=x86-64 -mtune=generic -O2"
+  CXXFLAGS="-march=x86-64 -mtune=generic -O2"
+  RUSTFLAGS="-C opt-level=2"
+  eval "$1"
+  [[ $CFLAGS == "-march=x86-64-v3 -O2" ]] || exit 11
+  [[ $CXXFLAGS == "-march=x86-64-v3 -O2" ]] || exit 12
+  [[ $RUSTFLAGS == "-C opt-level=2 -C target-cpu=x86-64-v3" ]] || exit 13
+  [[ $GOAMD64 == "v3" ]] || exit 14
+' _ "$_mkconf" || fail "makepkg.conf.d/t14s.conf runtime flag rewrite failed"
+unset -v _mkconf
+_stbody="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<\x27ST\x27$/{f=1;next} f&&/^ST$/{exit} f' "$ROOT/install.sh")"
+[[ -n $_stbody ]] || fail "could not extract t14s-selftest heredoc"
+bash -n <<<"$_stbody" || fail "t14s-selftest bash -n failed"
+grep -qE '^check .*\|' <<<"$_stbody" \
+  && fail "t14s-selftest must not pipe check() into another command (subshell loses ok/bad counter)" || true
+unset -v _stbody
 grep -q 'thinkpad-charge-thresholds.conf' "$ROOT/install.sh" \
   || fail "must install charge threshold tmpfiles"
 grep -q 'charge_control_start_threshold - - - - 70' "$ROOT/install.sh" \
