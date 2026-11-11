@@ -46,7 +46,15 @@ warn() {
   return 0
 }
 
-DRYRUN=${T14S_DRYRUN:-0}
+# Parse before any (( DRYRUN )): raw env text in arithmetic can run $(…), and an
+# unrecognized value must never fall through to a real install.
+_dr=${T14S_DRYRUN:-0}
+case ${_dr,,} in
+  0 | n | no | off | false) DRYRUN=0 ;;
+  1 | y | yes | on | true) DRYRUN=1 ;;
+  *) printf 'T14S_DRYRUN=%q not recognized (use 1 or 0)\n' "$_dr" >&2; exit 2 ;;
+esac
+unset -v _dr
 UI=${T14S_UI:-plain}
 # Accept 1/y/yes/on (case-insensitive) for env toggles — same spirit as yn_on.
 _env_on() { local v=${1,,}; [[ $v == 1 || $v == y || $v == yes || $v == on ]]; }
@@ -1168,7 +1176,7 @@ pick_timezone() {
 if (( ! DRYRUN )); then
   [[ $EUID -eq 0 ]] || die "run as root (from the Arch ISO)"
   [[ -d /sys/firmware/efi/efivars ]] || die "not booted in UEFI mode — enable UEFI and reboot the ISO"
-  # Leftover-state cleanup below disables all swap and unmounts /mnt: live ISO only.
+  # The installer assumes a disposable live environment (/mnt, cryptroot mapper).
   [[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]] \
     || die "not running from the Arch ISO (/run/archiso missing); set T14S_ALLOW_NON_ISO=1 to override"
   { ping -c1 -W3 archlinux.org || curl -fsS --max-time 6 https://archlinux.org; } >/dev/null 2>&1 \
@@ -1177,16 +1185,6 @@ if (( ! DRYRUN )); then
 fi
 bootstrap_ui
 say "preflight ok (UEFI + network + ntp)"
-
-# clean leftover state from a previous interrupted run so re-runs start fresh
-# (otherwise an open cryptroot / mounted /mnt keeps the disk busy → sgdisk/mkfs
-#  can't reformat → stale files survive → pacstrap 'conflicting files').
-# Never touch mounts/swap during T14S_DRYRUN (safe on a normal host).
-if (( ! DRYRUN )); then
-  umount -R /mnt 2>/dev/null || true
-  swapoff -a 2>/dev/null || true
-  cryptsetup close cryptroot 2>/dev/null || true
-fi
 
 if (( NONINTERACTIVE )); then
   warn "NONINTERACTIVE: skipping welcome TUI (answers + T14S_I_WILL_ERASE gate wipe)"
@@ -1275,9 +1273,17 @@ answers_load() {
   return 0
 }
 
+# Atomic: mktemp (always 0600) in the target dir, then rename over $f. A crash
+# never leaves a partial file, and a symlink at $f is replaced, not followed.
 answers_save() {
-  local f=$1 k val
-  {
+  local f=$1 k val tmp mode
+  tmp=$(mktemp "$(dirname -- "$f")/.t14s-answers.XXXXXX") || return 1
+  mode=$(stat -c '%a' "$tmp" 2>/dev/null || echo '')
+  if [[ $mode != 600 ]]; then
+    rm -f -- "$tmp"
+    die "answers temp file not mode 0600 (got ${mode:-unknown}): $tmp"
+  fi
+  if ! {
     printf '# t14s-arch-install answers — reload with T14S_ANSWERS=%s\n' "$f"
     printf '# Generated: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo unknown)"
     printf '# Passwords NEVER stored here — use T14S_PASS_FILE for unattended secrets.\n'
@@ -1285,15 +1291,10 @@ answers_save() {
       if [[ -v $k ]]; then val=${!k}; else val=; fi
       printf '%s=%s\n' "$k" "$val"
     done
-  } >"$f"
-  if ! chmod 600 "$f"; then
-    die "could not chmod 600 answers file: $f"
+  } >"$tmp" || ! mv -f -- "$tmp" "$f"; then
+    rm -f -- "$tmp"
+    return 1
   fi
-  _amode=$(stat -c '%a' "$f" 2>/dev/null || echo '')
-  if [[ $_amode != 600 && $_amode != 0600 ]]; then
-    die "answers file not mode 0600 after chmod (got ${_amode:-unknown}): $f"
-  fi
-  unset -v _amode
 }
 
 # Secrets file (LUKS/USER/ROOT only). Never written by answers_save.
@@ -1694,7 +1695,11 @@ Use it anyway?" no warn || die "aborted"
       ui_info "Reusing ESP $EFI_PART (FAT, kept).
 
 Existing /EFI entries (other OSes stay bootable):
-${_esp_entries:-   (none)}"
+${_esp_entries:-   (none)}
+
+Changed on this ESP: systemd-boot is installed, /EFI/BOOT/BOOTX64.EFI (the
+firmware fallback loader) is replaced, and /loader/loader.conf is rewritten.
+Originals are kept as *.pre-arch.bak next to them."
     elif [[ $efifs == vfat ]]; then
       ui_critical "DANGER: $EFI_PART is ALREADY FAT — likely a shared ESP.
 Formatting ERASES other OSes' bootloaders."
@@ -2195,6 +2200,35 @@ fi
 start_log
 ui_step 11 Install
 
+# Release leftover state from a previous interrupted run on the CONFIRMED target
+# (an open cryptroot / mounted /mnt keeps the disk busy → sgdisk/mkfs fail).
+# Only touches mounts, swap, and the cryptroot mapper backed by the target;
+# anything else in the way aborts instead of being torn down.
+_on_target() {
+  local d=$1
+  if [[ $d == /dev/mapper/cryptroot ]]; then
+    d=$(cryptsetup status cryptroot 2>/dev/null | awk '$1 == "device:" {print $2}')
+  fi
+  [[ -n $d ]] || return 1
+  if [[ $d == "$ROOT_PART" || $d == "$EFI_PART" ]]; then return 0; fi
+  if [[ $MODE == auto ]]; then part_on_disk "$d" "$DISK"; else return 1; fi
+}
+if mountpoint -q /mnt; then
+  _src=$(findmnt -nvo SOURCE /mnt)
+  _on_target "$_src" || die "/mnt is mounted from $_src, not the install target — unmount it and re-run"
+  umount -R /mnt
+fi
+while read -r _sw; do
+  if _on_target "$_sw"; then swapoff "$_sw"; fi
+done < <(swapon --show=NAME --noheadings 2>/dev/null)
+if [[ -e /dev/mapper/cryptroot ]]; then
+  _on_target /dev/mapper/cryptroot \
+    || die "/dev/mapper/cryptroot is open on another device — close it and re-run"
+  cryptsetup close cryptroot
+fi
+unset -v _src _sw
+unset -f _on_target
+
 # ── 4b. write the partition table (AUTO only) ───────────────
 if [[ $MODE == auto ]]; then
   step "partitioning $DISK (GPT: 2G ESP + LUKS)"
@@ -2662,9 +2696,17 @@ stage 24 27 "systemd-boot"
 # bootloader — when reusing a shared/multiboot ESP, back up another OS's fallback
 # loader first. On a freshly-formatted ESP there's nothing to preserve (no clutter).
 say "systemd-boot"
-if [[ ${FORMAT_EFI:-1} == 0 && -f /boot/EFI/BOOT/BOOTX64.EFI ]]; then
-  cp -n /boot/EFI/BOOT/BOOTX64.EFI /boot/EFI/BOOT/BOOTX64.EFI.pre-arch.bak 2>/dev/null || true
-  say "backed up existing /EFI/BOOT/BOOTX64.EFI -> .pre-arch.bak"
+# cp -n keeps the first (pre-Arch) backup across installer re-runs.
+if [[ ${FORMAT_EFI:-1} == 0 ]]; then
+  for _bk in /boot/EFI/BOOT/BOOTX64.EFI /boot/loader/loader.conf; do
+    [[ -f $_bk ]] || continue
+    if cp -n "$_bk" "$_bk.pre-arch.bak"; then
+      say "backed up existing ${_bk#/boot} -> .pre-arch.bak"
+    else
+      say "WARN: could not back up ${_bk#/boot} before replacing it"
+    fi
+  done
+  unset -v _bk
 fi
 bootctl install
 # inform: coexisting loaders systemd-boot will auto-detect (Windows, other Linux)

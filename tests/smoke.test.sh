@@ -698,8 +698,6 @@ grep -q 'unset -v LUKS_PASS USER_PASS ROOT_PASS' "$ROOT/install.sh" \
   || fail "must unset ambient password env at start"
 grep -q 'cannot read mode of T14S_PASS_FILE' "$ROOT/install.sh" \
   || fail "secrets_load must fail closed if mode unknown"
-grep -q 'could not chmod 600 answers' "$ROOT/install.sh" \
-  || fail "answers_save must die if chmod 600 fails"
 grep -q 'EXTRA_PKGS_LIST' "$ROOT/install.sh" \
   || fail "must persist EXTRA_PKGS_LIST in answers"
 grep -q "v == y || \$v == yes" "$ROOT/install.sh" \
@@ -841,17 +839,22 @@ PY
 grep -q 'Prefer dialog' "$ROOT/install.sh" \
   || grep -A2 'command -v dialog' "$ROOT/install.sh" | grep -q 'UI=dialog' \
   || fail "bootstrap must prefer dialog when available"
-# DRYRUN must not disable host swap / tear down /mnt before the dry-run exit
-python3 - "$ROOT/install.sh" <<'PY' || fail "umount/swapoff must be inside if (( ! DRYRUN ))"
+# Leftover cleanup: only after the final confirm + DRYRUN exit, only on the target.
+python3 - "$ROOT/install.sh" <<'PY' || fail "leftover cleanup must run after confirmation and be target-scoped"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
-i = t.find("umount -R /mnt")
-assert i > 0, "umount missing"
-window = t[max(0, i - 200):i]
-assert "if (( ! DRYRUN ))" in window, "umount not guarded by ! DRYRUN"
-assert "swapoff -a" in t[i:i + 160], "swapoff missing near umount"
-print("ok dryrun guard")
+confirm = t.find('"Start the installation? The partitions above will be ERASED."')
+dry_exit = t.find("exit 0", t.find("if (( DRYRUN )); then\n  printf 'DRYRUN:"))
+umount = t.find("umount -R /mnt")
+part = t.find('sgdisk --zap-all "$DISK"')
+assert 0 < confirm < dry_exit < umount < part, (confirm, dry_exit, umount, part)
+assert "swapoff -a" not in t, "global swapoff -a must not be used"
+window = t[t.rfind("if mountpoint -q /mnt", 0, umount):umount]
+assert '_on_target "$_src" || die' in window, "umount /mnt must be gated on the target"
+assert 'if _on_target "$_sw"; then swapoff "$_sw"' in t, "swapoff must be per-device on the target"
+assert "_on_target /dev/mapper/cryptroot" in t, "cryptroot close must be gated on the target"
+print("ok scoped leftover cleanup")
 PY
 
 # partitioning: partitions chosen from lists, sizes validated
@@ -1071,12 +1074,6 @@ PY
 _pick="$(awk '/^pick_part\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
 grep -q 'part_on_disk "\$ans" "\$disk"' <<<"$_pick" \
   || fail "pick_part must reject manual partitions on another disk"
-# ISO gate must sit in the non-DRYRUN preflight, before swapoff -a.
-_iso=$(grep -n '/run/archiso' "$ROOT/install.sh" | head -1 | cut -d: -f1)
-_swp=$(grep -n 'swapoff -a' "$ROOT/install.sh" | head -1 | cut -d: -f1)
-if [[ -z $_iso || -z $_swp ]] || (( _iso >= _swp )); then
-  fail "Arch ISO check must run before preflight swapoff/umount"
-fi
 grep -qF '[[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]]' "$ROOT/install.sh" \
   || fail "preflight must require /run/archiso unless T14S_ALLOW_NON_ISO=1"
 grep -q 'iflag=count_bytes count="\$size"' "$ROOT/install.sh" \
@@ -1104,5 +1101,68 @@ grep -q 'plain | dialog | whiptail) UI=\$T14S_UI' "$ROOT/install.sh" \
   || fail "T14S_UI must be limited to plain|dialog|whiptail"
 grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$ROOT/install.sh" \
   || fail "ERR trap must report the failed command"
+
+# T14S_DRYRUN: unknown values abort (never a silent real install) and are
+# never evaluated as arithmetic (no $(…) execution).
+_tmp="$(mktemp -d)"
+for _v in true 'maybe' "a[\$(touch $_tmp/pwned)]"; do
+  _rc=0
+  T14S_DRYRUN="$_v" T14S_NONINTERACTIVE=1 timeout 30 bash "$ROOT/install.sh" </dev/null >/dev/null 2>&1 || _rc=$?
+  [[ -e $_tmp/pwned ]] && fail "T14S_DRYRUN value was executed: $_v"
+  if [[ $_v == true ]]; then
+    (( _rc != 2 )) || fail "T14S_DRYRUN=true must be accepted as dry run"
+  else
+    (( _rc == 2 )) || fail "T14S_DRYRUN=$_v must abort with exit 2 (got $_rc)"
+  fi
+done
+
+# answers_save: atomic rename, mode 0600, replaces a symlink instead of following it.
+printf 'victim\n' >"$_tmp/victim"
+ln -s "$_tmp/victim" "$_tmp/answers.env"
+_fn="$(awk '/^answers_save\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
+[[ -n $_fn ]] || fail "could not extract answers_save"
+bash -c '
+  set -euo pipefail
+  die() { echo "die: $*" >&2; exit 9; }
+  eval "$1"
+  ANSWERS_KEYS=(MODE HOSTNAME); MODE=auto; HOSTNAME=t14s
+  answers_save "$2"
+' _ "$_fn" "$_tmp/answers.env" || fail "answers_save failed"
+[[ ! -L $_tmp/answers.env ]] || fail "answers_save must replace a symlink, not follow it"
+[[ $(cat "$_tmp/victim") == victim ]] || fail "answers_save wrote through a symlink"
+[[ $(stat -c %a "$_tmp/answers.env") == 600 ]] || fail "answers file must be mode 0600"
+grep -qx 'HOSTNAME=t14s' "$_tmp/answers.env" || fail "answers file content missing"
+[[ -z $(find "$_tmp" -name '.t14s-answers.*') ]] || fail "answers_save left a temp file"
+rm -rf "$_tmp"
+
+# _on_target: only the confirmed target (or, in auto mode, partitions on DISK).
+_fn="$(awk '/^_on_target\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
+[[ -n $_fn ]] || fail "could not extract _on_target"
+bash -c '
+  set -euo pipefail
+  eval "$1"
+  part_on_disk() { [[ $1 == /dev/nvme0n1p* && $2 == /dev/nvme0n1 ]]; }
+  cryptsetup() { printf "  type:    LUKS2\n  device:  %s\n" "$CRYPT_DEV"; }
+  ROOT_PART=/dev/nvme0n1p2 EFI_PART=/dev/nvme0n1p1 DISK=/dev/nvme0n1
+  MODE=manual
+  _on_target /dev/nvme0n1p2 || exit 11
+  _on_target /dev/nvme0n1p1 || exit 12
+  ! _on_target /dev/nvme0n1p3 || exit 13        # same disk, not chosen (manual)
+  ! _on_target /dev/sda1 || exit 14
+  ! _on_target /swapfile || exit 15
+  CRYPT_DEV=/dev/nvme0n1p2; _on_target /dev/mapper/cryptroot || exit 16
+  CRYPT_DEV=/dev/sda2; ! _on_target /dev/mapper/cryptroot || exit 17
+  MODE=auto ROOT_PART= EFI_PART=
+  _on_target /dev/nvme0n1p3 || exit 18          # auto: whole disk is the target
+  ! _on_target /dev/sda1 || exit 19
+' _ "$_fn" || fail "_on_target ownership check wrong (exit $?)"
+
+# Reused ESP: back up loader.conf and the fallback loader, and say so up front.
+grep -q 'for _bk in /boot/EFI/BOOT/BOOTX64.EFI /boot/loader/loader.conf; do' "$ROOT/install.sh" \
+  || fail "reused ESP must back up BOOTX64.EFI and loader.conf"
+! grep -q 'BOOTX64.EFI.pre-arch.bak 2>/dev/null || true' "$ROOT/install.sh" \
+  || fail "ESP backup failure must be reported, not swallowed"
+grep -q 'firmware fallback loader) is replaced' "$ROOT/install.sh" \
+  || fail "ESP reuse prompt must warn that BOOTX64.EFI and loader.conf change"
 
 echo "PASS: smoke.test.sh"

@@ -480,13 +480,21 @@ Or dry-run menus only (no disk writes) from a normal shell:
 T14S_DRYRUN=1 bash install.sh
 ```
 
-Real runs refuse to start outside the Arch ISO (`/run/archiso` missing),
-because preflight cleanup runs `swapoff -a` and `umount -R /mnt`. Override with
-`T14S_ALLOW_NON_ISO=1` only on a disposable live environment.
+Real runs refuse to start outside the Arch ISO (`/run/archiso` missing).
+Override with `T14S_ALLOW_NON_ISO=1` only on a disposable live environment.
+Nothing on disk changes before the final confirmation. Leftovers from an
+interrupted run (`/mnt`, swap, the `cryptroot` mapper) are released only after
+it, and only when they belong to the confirmed target; anything else in the
+way aborts the install instead of being torn down.
 
-`T14S_DRYRUN=1` skips root/UEFI/network checks and does **not**
-`umount`/`swapoff`/`cryptsetup close`. Interactive dry runs still need a
-TTY for menus; `T14S_NONINTERACTIVE=1` dry runs do not (CI uses that path).
+`T14S_DRYRUN=1` (accepts `1/0`, `yes/no`, `on/off`, `true/false`; any other
+value aborts) skips root/UEFI/network checks, runs the full wizard and review,
+then exits before partitioning. It never unmounts, partitions, or formats
+anything (the only mount is a brief read-only mount of a reused ESP to list
+its entries), but it **does** write the answers file
+(`T14S_ANSWERS_OUT`, default `/tmp/t14s-answers.env`, mode `0600`, no
+passwords). Interactive dry runs still need a TTY for menus;
+`T14S_NONINTERACTIVE=1` dry runs do not (CI uses that path).
 NONINTERACTIVE VM runs auto-set `SKIP_THINKPAD_HW=Y`.
 
 ---
