@@ -8,6 +8,9 @@ Hardened **Arch Linux** Stage A installer for:
 One curl-able script (`install.sh`). Interactive TUI by default; unattended
 with answers + a secrets file. `HW_PROFILE=t14s|p15` is auto-detected from DMI
 (or set in answers). Firewall: **firewalld** (`nftables`, default zone `drop`).
+P15-only optional **`ollama-cuda`** binds `127.0.0.1:11434` (Quadro T1000 4GB).
+Stage B (labs / AI / rice / firewalld zones) lives in the sibling local
+`~/dotfiles` tree (`configure.sh` / `install.sh`).
 
 UX ideas adapted from [archfi](https://github.com/MatMoul/archfi) and
 [archdi-pkg](https://github.com/MatMoul/archdi-pkg). Not ported: i18n packs,
@@ -327,13 +330,18 @@ Stuck on pacstrap? Other TTY (`Ctrl+Alt+F2`): `tail -f /tmp/t14s-install.*.log`
 
 ```bash
 reboot   # remove the ISO
+# T14s (21CQ/21CR):
 lscpu | grep -i ryzen
 cat /sys/power/mem_sleep          # expect [s2idle]
 grep -E 'amd_iommu|amd_pstate' /proc/cmdline
+# P15 (20SU): confirm Optimus + optional ollama-cuda
+#   lspci -nnk -d 10de: | grep -A2 'Kernel driver'
+#   systemctl status ollama   # if INSTALL_OLLAMA=Y → 127.0.0.1:11434
 # ThinkPad only — missing on a VM is normal
 cat /sys/class/power_supply/BAT0/charge_control_start_threshold  # 70
 cat /sys/class/power_supply/BAT0/charge_control_end_threshold    # 80
 systemctl status thinkpad-charge-thresholds.service --no-pager
+firewall-cmd --get-default-zone   # expect drop
 t14s-selftest   # if that option was enabled
 journalctl -u t14s-flatpak-apps -f   # GNOME: browsers/VPN install once online
 
@@ -345,6 +353,23 @@ sudo bash host-check.sh     # adds /boot UKIs, LUKS PBKDF, sbctl, snapper
 tuned-adm active                     # if tuned chosen (GNOME power menu → tuned-ppd)
 sudo less /var/log/t14s-install.log  # full installer log
 ```
+
+### Stage B (dotfiles)
+
+On the installed host, open your local `~/dotfiles` checkout (sibling repo), then
+either the TUI modules or full bootstrap:
+
+```bash
+cd ~/dotfiles
+bash scripts/configure.sh   # firewalld migrate (virbr0→libvirt, virbr-malware→lab-malware),
+                            # labs, AI stack (Headroom/hr-*, Ponytail, Continue FIM),
+                            # Gruvbox rice, P15 ollama-setup
+# or:
+./install.sh                # full Stage B (Caveman + Ponytail complementary hooks)
+```
+
+Lab wrappers after SETUP_LABS: `lab-triage` / `lab-re` / `lab-android` / `lab-web` /
+`lab-detonate` / `lab-mcp`. REA backends live in `lab-re` (`rea-agents@6.9.0`).
 
 Same notes (plus any install warnings) land in `/root/t14s-post-install.txt`.
 
