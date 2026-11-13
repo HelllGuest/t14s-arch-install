@@ -957,12 +957,16 @@ for _flag in DESKTOP INSTALL_NERD_FONTS ENROLL_SB ENABLE_SSHD INSTALL_CUPS \
   INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN \
   INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST \
   CLEAN_ESP_ARCH INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT \
+  INSTALL_OLLAMA FW_SYNCTHING FW_KDECONNECT \
   UFW_SYNCTHING UFW_KDECONNECT SKIP_THINKPAD_HW
 do
   [[ -v $_flag ]] || printf -v "$_flag" '%s' N
   yn_canon "$_flag"
 done
 unset -v _flag
+# Prefer FW_*; keep UFW_* mirrors for old answers / tooling.
+UFW_SYNCTHING=$FW_SYNCTHING
+UFW_KDECONNECT=$FW_KDECONNECT
 
 # ── final summary ───────────────────────────────────────────
 ui_step 10 Review
@@ -1096,25 +1100,7 @@ unset -v _reflector_args
 # root and hit 'conflicting files'.
 pacman_tune /etc/pacman.conf "$PACMAN_PARALLEL"
 
-BASE_PKGS=(
-  base base-devel
-  linux-lts linux-lts-headers linux-hardened linux-hardened-headers
-  linux-firmware "$UCODE"
-  btrfs-progs cryptsetup
-  bluez bluez-utils
-  networkmanager sudo zsh git vim nano
-  reflector pacman-contrib
-  mkinitcpio snapper snap-pac zram-generator
-  apparmor firewalld sbctl efibootmgr
-  wireless-regdb
-  xdg-user-dirs
-)
-if yn_on "${INSTALL_LINUX_STABLE:-N}"; then
-  BASE_PKGS+=(linux linux-headers)
-fi
-if yn_on "${INSTALL_PLYMOUTH:-N}"; then
-  BASE_PKGS+=(plymouth)
-fi
+t14s_base_packages
 # Deduplicate extras already in the fixed base set.
 if ((${#EXTRA_PKGS[@]})); then
   _seen=' '
@@ -1151,8 +1137,10 @@ _deploy_lib() {
   elif [[ -n ${T14S_LIB_FETCH_DIR:-} && -f $T14S_LIB_FETCH_DIR/$f ]]; then
     cp -a "$T14S_LIB_FETCH_DIR/$f" "/mnt/root/t14s-lib/$f"
   else
-    curl -fsSL "$T14S_BASE_URL/lib/$f" -o "/mnt/root/t14s-lib/$f"
+    curl -fsSL "$T14S_BASE_URL/lib/$f" -o "/mnt/root/t14s-lib/$f" \
+      || die "failed to fetch lib/$f from $T14S_BASE_URL"
   fi
+  [[ -s /mnt/root/t14s-lib/$f ]] || die "deployed lib/$f is missing or empty"
 }
 _deploy_lib 70-firewall.sh
 _deploy_lib 80-chroot-setup.sh
@@ -1182,6 +1170,7 @@ cleanup_chroot_secrets() {
   shred -u /mnt/root/chroot-setup.sh /mnt/root/.install-secrets 2>/dev/null \
     || rm -f /mnt/root/chroot-setup.sh /mnt/root/.install-secrets
   rm -f /mnt/root/t14s-lib.sh
+  rm -rf /mnt/root/t14s-lib
 }
 # Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
 # SNAP_PAC_SKIP=y: snap-pac hooks can't run snapper in the chroot ("fatal

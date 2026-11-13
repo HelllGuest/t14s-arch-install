@@ -578,7 +578,7 @@ lib/30-hardware.sh         # DMI / ThinkPad helpers
 lib/40-disk.sh             # LUKS / Btrfs helpers
 lib/50-packages.sh         # package list stubs / helpers
 lib/60-boot.sh             # boot helpers
-lib/70-firewall.sh         # firewalld (drop zone, FW_* ports, mask ufw)
+lib/70-firewall.sh         # firewalld drop zone via firewall-offline-cmd; FW_* ports; mask ufw
 lib/80-chroot-setup.sh     # chroot body (deployed into the target)
 tests/                     # smoke + host-check
 ```

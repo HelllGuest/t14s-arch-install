@@ -37,9 +37,16 @@ grep -q 'firewalld' "$INSTALL_SH" || fail "must install/enable firewalld"
 
 grep -q 'configure_firewalld' "$INSTALL_SH" || fail "must define configure_firewalld"
 grep -q 'DefaultZone=drop' "$INSTALL_SH" || fail "must set firewalld DefaultZone=drop"
+grep -q 'firewall-offline-cmd' "$INSTALL_SH" \
+  || fail "chroot firewall must prefer firewall-offline-cmd"
 grep -q 'T14S_LIB_DIR' "$ROOT/install.sh" || fail "orchestrator must support T14S_LIB_DIR"
 grep -q '70-firewall.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 70-firewall.sh"
 grep -q '80-chroot-setup.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 80-chroot-setup.sh"
+grep -q 't14s_base_packages' "$INSTALL_SH" || fail "pacstrap must use t14s_base_packages"
+grep -q 'rm -rf /mnt/root/t14s-lib' "$ROOT/install.sh" \
+  || fail "cleanup must remove /mnt/root/t14s-lib"
+grep -q 'deployed lib/.*missing or empty' "$ROOT/install.sh" \
+  || fail "_deploy_lib must reject empty modules"
 grep -q 'systemctl mask ufw' "$INSTALL_SH" \
   || fail "must mask ufw when enabling firewalld"
 grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$INSTALL_SH" \
@@ -579,17 +586,24 @@ rm -rf "$_pk"; unset -v _pk _chroot_body
 echo "ok pkg_try"
 
 # New option flags are wired end to end (answers, canonicalize, chroot env).
-for _fl in INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT; do
+for _fl in INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT \
+           INSTALL_OLLAMA FW_SYNCTHING FW_KDECONNECT; do
   python3 - "$INSTALL_SH" "$_fl" <<'PY' || fail "flag $_fl not wired everywhere"
 import re, sys
 t = open(sys.argv[1]).read(); f = sys.argv[2]
 keys = t[t.index('ANSWERS_KEYS=('):t.index(')', t.index('ANSWERS_KEYS=('))]
 assert f in keys.split(), 'ANSWERS_KEYS'
-canon = t[t.index('for _flag in DESKTOP'):t.index('do', t.index('for _flag in DESKTOP'))]
+# Tokenize the yn_canon for-list (stop at newline+do), not substring 'do' in names.
+start = t.index('for _flag in DESKTOP')
+end = t.index('\ndo\n', start)
+canon = t[start:end]
 assert f in canon.split(), 'yn_canon loop'
 env = t[t.index('arch-chroot /mnt env'):t.index('bash /root/chroot-setup.sh', t.index('arch-chroot /mnt env'))]
 assert f'{f}="${f}"' in env, 'chroot env'
-assert f'${{{f}:=N}}' in t, 'default'
+if f.startswith('FW_'):
+  assert f'{f}:=' in t, 'default'
+else:
+  assert f'${{{f}:=N}}' in t, 'default'
 PY
 done
 unset -v _fl
@@ -600,7 +614,7 @@ grep -q 'runuser -u "$USERNAME" -- git clone --depth 1 https://aur.archlinux.org
 grep -vE '^\s*#' "$INSTALL_SH" | grep -q 'NOPASSWD' \
   && fail "installer must not grant sudoers NOPASSWD" || true
 grep -q 'rtkit evolution-data-server' "$INSTALL_SH" || fail "GNOME needs rtkit + evolution-data-server"
-grep -q '^  wireless-regdb$' "$INSTALL_SH" || fail "base needs wireless-regdb (regulatory.db)"
+grep -qE '^[[:space:]]+wireless-regdb$' "$INSTALL_SH" || fail "base needs wireless-regdb (regulatory.db)"
 grep -q 'install -m 600 "$LOG" /mnt/var/log/t14s-install.log' "$INSTALL_SH" \
   || fail "install log must be kept on the target"
 grep -q 'INSTALL COMPLETE with warnings' "$INSTALL_SH" || fail "finish screen must surface warnings"
