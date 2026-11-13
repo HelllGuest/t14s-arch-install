@@ -533,11 +533,12 @@ sudo sbctl sign-all          # resign everything sbctl tracks
 
 ## Rehearse in a VM
 
-Installer-only repo. If you already have a UEFI qemu harness that can feed
-this script:
+Headless NONINTERACTIVE install into a blank virtio disk (needs kvm + OVMF):
 
 ```bash
-INSTALLER=install.sh scripts/arch-install-vmtest.sh
+FRESH=1 bash tests/vm-run.sh
+# serves this tree on :8765, boots Arch ISO, serial-drives tests/vm-bootstrap.sh
+# (minimal preset, ENABLE_SSHD=Y). Log: ~/arch-vmtest/qemu-serial.log
 ```
 
 Or dry-run menus only (no disk writes) from a normal shell:

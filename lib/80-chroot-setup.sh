@@ -12,6 +12,8 @@ say(){
   if [[ $* == WARN:* ]]; then printf '%s\n' "${*#WARN: }" >>"$WARN_FILE"; fi
   return 0
 }
+warn(){ say "WARN: $*"; }
+ok(){ say "ok $*"; }
 # Progress marker for the host gauge (progress_filter): stage <lo%> <hi%> <text>
 stage(){ printf '@@STAGE %s %s %s\n' "$1" "$2" "$3"; }
 yn_on() { local v=${1,,}; [[ $v == y || $v == yes || $v == on || $v == 1 ]]; }

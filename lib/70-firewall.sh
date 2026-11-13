@@ -6,19 +6,27 @@
 # Called from chroot after base services; optional ports from answers.
 # Prefer firewall-offline-cmd: firewalld is not running inside arch-chroot.
 
+# Chroot only defines say/stage/yn_on — keep logging self-contained.
+_fw_say() { if declare -F say >/dev/null 2>&1; then say "$@"; else printf '>> %s\n' "$*"; fi; }
+_fw_warn() { _fw_say "WARN: $*"; }
+_fw_ok() { _fw_say "ok $*"; }
+
 # Run a permanent firewalld mutation (offline in chroot, live if daemon up).
 _fw_perm() {
-  if command -v firewall-offline-cmd >/dev/null 2>&1; then
+  if [[ -x /usr/bin/firewall-offline-cmd ]] || command -v firewall-offline-cmd >/dev/null 2>&1; then
     firewall-offline-cmd "$@"
-  elif systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --permanent "$@"
-  else
-    firewall-cmd --permanent "$@"
+    return
   fi
+  if systemctl is-active --quiet firewalld 2>/dev/null; then
+    firewall-cmd --permanent "$@"
+    return
+  fi
+  _fw_warn "firewall-offline-cmd missing and firewalld inactive — cannot apply: $*"
+  return 1
 }
 
 configure_firewalld() {
-  say "firewalld: default zone drop + optional ports"
+  _fw_say "firewalld: default zone drop + optional ports"
 
   mkdir -p /etc/firewalld
   if [[ ! -f /etc/firewalld/firewalld.conf ]]; then
@@ -41,31 +49,31 @@ configure_firewalld() {
 
   if yn_on "${ENABLE_SSHD:-N}"; then
     _fw_perm --add-service=ssh \
-      || warn "firewalld: could not add ssh service"
+      || _fw_warn "firewalld: could not add ssh service"
   fi
 
   # Syncthing: transfer 22000/tcp (+ optional quic 22000/udp), discovery 21027/udp
   if yn_on "${FW_SYNCTHING:-${UFW_SYNCTHING:-N}}"; then
     _fw_perm --add-port=22000/tcp \
-      || warn "firewalld: could not allow Syncthing 22000/tcp"
+      || _fw_warn "firewalld: could not allow Syncthing 22000/tcp"
     _fw_perm --add-port=22000/udp \
-      || warn "firewalld: could not allow Syncthing 22000/udp"
+      || _fw_warn "firewalld: could not allow Syncthing 22000/udp"
     _fw_perm --add-port=21027/udp \
-      || warn "firewalld: could not allow Syncthing 21027/udp"
+      || _fw_warn "firewalld: could not allow Syncthing 21027/udp"
   fi
 
   if yn_on "${FW_KDECONNECT:-${UFW_KDECONNECT:-N}}"; then
     _fw_perm --add-port=1714-1764/tcp \
-      || warn "firewalld: could not allow KDE Connect tcp"
+      || _fw_warn "firewalld: could not allow KDE Connect tcp"
     _fw_perm --add-port=1714-1764/udp \
-      || warn "firewalld: could not allow KDE Connect udp"
+      || _fw_warn "firewalld: could not allow KDE Connect udp"
   fi
 
   # Live reload only when the daemon is up (skip in chroot / offline path).
   if systemctl is-active --quiet firewalld 2>/dev/null; then
-    firewall-cmd --reload || warn "firewalld: reload failed"
+    firewall-cmd --reload || _fw_warn "firewalld: reload failed"
   fi
-  ok "firewalld configured (zone drop)"
+  _fw_ok "firewalld configured (zone drop)"
 }
 
 check_firewalld() {
