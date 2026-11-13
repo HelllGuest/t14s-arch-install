@@ -5,9 +5,11 @@ Hardened **Arch Linux** Stage A installer for:
 * **Lenovo ThinkPad T14s Gen 3 AMD** (type **21CQ / 21CR**; example MTM `21CRS1PU00`)
 * **Lenovo ThinkPad P15 Gen 1** (type **20SU**; Optimus NVIDIA Quadro)
 
-One curl-able script (`install.sh`). Interactive TUI by default; unattended
-with answers + a secrets file. `HW_PROFILE=t14s|p15` is auto-detected from DMI
-(or set in answers). Firewall: **firewalld** (`nftables`, default zone `drop`).
+Curl-able orchestrator (`install.sh`) plus `lib/*.sh` modules. Interactive TUI
+by default; unattended with answers + a secrets file. `HW_PROFILE=t14s|p15` is
+auto-detected from DMI (or set in answers). Firewall: **firewalld**
+(`nftables`, default zone `drop`; UFW masked if present). Optional ports:
+`FW_SYNCTHING` / `FW_KDECONNECT` (legacy `UFW_*` answers still accepted).
 P15-only optional **`ollama-cuda`** binds `127.0.0.1:11434` (Quadro T1000 4GB).
 Stage B (labs / AI / rice / firewalld zones) lives in the sibling local
 `~/dotfiles` tree (`configure.sh` / `install.sh`).
@@ -257,9 +259,13 @@ repo URL is hardcoded).
 and `EFI/arch` dirs; kernels/ucode always cleared for pacstrap; ignored /
 forced `Y` when `FORMAT_EFI=1`; does not remove other vendors’ `EFI/*` dirs
 or `linux-*.conf`) · `INSTALL_MULTILIB` `INSTALL_YAY` `INSTALL_TUNED`
-`INSTALL_DEVTOOLS` `INSTALL_BTRFS_ASSISTANT` · `EXTRA_PKGS_LIST`. Prefer `Y`/`N`. Passwords are
-**never** stored in answers. `answers_save` hard-requires mode `0600`.
-`T14S_NONINTERACTIVE` / `T14S_I_WILL_ERASE` accept `1` / `y` / `yes` / `on`.
+`INSTALL_DEVTOOLS` `INSTALL_BTRFS_ASSISTANT` · `EXTRA_PKGS_LIST`. Prefer `Y`/`N`.
+Passwords are **never** stored in answers. `answers_save` hard-requires mode
+`0600`. `T14S_NONINTERACTIVE` / `T14S_I_WILL_ERASE` accept `1` / `y` / `yes` /
+`on`.
+
+**Migration:** old answers with `UFW_SYNCTHING` / `UFW_KDECONNECT` still work;
+new saves prefer `FW_*`. Rename when convenient.
 
 ### Message severity
 
@@ -561,8 +567,32 @@ NONINTERACTIVE VM runs auto-set `SKIP_THINKPAD_HW=Y`.
 
 ## Develop / CI
 
+Layout:
+
+```text
+install.sh                 # thin orchestrator (curl target)
+lib/00-common.sh           # colors, logging, die/say/ok/warn, yn helpers
+lib/10-ui.sh               # TUI layer
+lib/20-answers.sh          # answers + secrets
+lib/30-hardware.sh         # DMI / ThinkPad helpers
+lib/40-disk.sh             # LUKS / Btrfs helpers
+lib/50-packages.sh         # package list stubs / helpers
+lib/60-boot.sh             # boot helpers
+lib/70-firewall.sh         # firewalld (drop zone, FW_* ports, mask ufw)
+lib/80-chroot-setup.sh     # chroot body (deployed into the target)
+tests/                     # smoke + host-check
+```
+
+Local work (no GitHub fetch of `lib/`):
+
+```bash
+T14S_LIB_DIR=./lib bash install.sh
+# or: bash install.sh   # auto-detects sibling lib/ next to this script
+```
+
 ```bash
 bash -n install.sh
+bash -n lib/*.sh
 bash tests/smoke.test.sh
 bash tests/host-check.test.sh   # host-check.sh parsers (stubs, no host state)
 
@@ -582,6 +612,8 @@ GitHub Actions: smoke + shellcheck on push. Smoke includes a
 `T14S_DRYRUN=1` NONINTERACTIVE run against a whole-disk block device
 (no TTY; no writes past the DRYRUN exit; keymap via
 `T14S_IDENTITY_OVERRIDES` + `KEYMAP_DIR` fixture on Ubuntu runners).
+Curl one-liners still hit `install.sh`, which fetches `lib/*.sh` from the same
+repo/branch when no local `lib/` is present.
 
 ## License
 

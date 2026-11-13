@@ -38,7 +38,7 @@ printf '%s\n' 'CFLAGS="-march=x86-64 -mtune=generic -O2"' 'OPTIONS=(strip !debug
 mkdir -p "$T/mk.d"
 printf 'RUSTFLAGS="-C force-frame-pointers=yes"\n' >"$T/mk.d/rust.conf"
 awk '/^cat > \/etc\/makepkg\.conf\.d\/t14s\.conf <<.EOF.$/{f=1;next} f&&/^EOF$/{exit} f' \
-  "$ROOT/install.sh" >"$T/mk.d/t14s.conf"
+  "$ROOT/lib/80-chroot-setup.sh" >"$T/mk.d/t14s.conf"
 [[ -s $T/mk.d/t14s.conf ]] || fail "could not extract installer t14s.conf"
 out=$(hc makepkg_flags "$T/makepkg.conf" "$T/mk.d")
 grep -qx 'RUSTFLAGS=-C force-frame-pointers=yes -C target-cpu=x86-64-v3' <<<"$out" || fail "makepkg_flags RUSTFLAGS: $out"

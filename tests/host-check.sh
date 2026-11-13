@@ -149,11 +149,15 @@ else FAIL "snapper config 'root' missing"; fi
 section "Security"
 if grep -q apparmor /sys/kernel/security/lsm 2>/dev/null; then PASS "AppArmor is an active LSM"; else FAIL "AppArmor not in /sys/kernel/security/lsm"; fi
 check "apparmor.service active" unit_on apparmor.service
-check "ufw.service active" unit_on ufw.service
-check "ufw enabled in ufw.conf" grep -qx 'ENABLED=yes' /etc/ufw/ufw.conf
+check "firewalld.service active" unit_on firewalld.service
+check "firewalld enabled" systemctl is-enabled --quiet firewalld
 if is_root; then
-  ufw status 2>/dev/null | grep -qi 'Status: active' && PASS "ufw firewall active (ufw status)" || FAIL "ufw status not active"
-  ufw status verbose 2>/dev/null | grep -qi 'deny (incoming)' && PASS "ufw default deny incoming" || FAIL "ufw default is not deny incoming"
+  firewall-cmd --state 2>/dev/null | grep -qi running \
+    && PASS "firewalld running (firewall-cmd --state)" \
+    || FAIL "firewalld not running"
+  grep -q '^DefaultZone=drop' /etc/firewalld/firewalld.conf 2>/dev/null \
+    && PASS "firewalld DefaultZone=drop" \
+    || FAIL "firewalld DefaultZone is not drop"
 fi
 for f in /etc/sysctl.d/99-security.conf /etc/sysctl.d/99-userns.conf; do sysctl_check "$f"; done
 

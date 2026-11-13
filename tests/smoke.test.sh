@@ -3,72 +3,92 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Concatenated INSTALL_SH lives under /tmp — force local modules for live runs.
+export T14S_LIB_DIR="${T14S_LIB_DIR:-$ROOT/lib}"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 [[ -f "$ROOT/install.sh" ]] || fail "missing install.sh"
 [[ -x "$ROOT/install.sh" ]] || fail "install.sh not executable"
 bash -n "$ROOT/install.sh" || fail "bash -n failed"
+[[ -d $ROOT/lib ]] || fail "missing lib/ (modular layout)"
+shopt -s nullglob
+for _lib in "$ROOT"/lib/*.sh; do
+  bash -n "$_lib" || fail "bash -n failed: $_lib"
+done
+unset -v _lib
+# Greps search orchestrator + modules. Live runs use ORCH_SH (not the concat).
+ORCH_SH="$ROOT/install.sh"
+INSTALL_SH=$(mktemp)
+trap 'rm -f "$INSTALL_SH"' EXIT
+cat "$ROOT/install.sh" "$ROOT"/lib/*.sh >"$INSTALL_SH"
+
 [[ -x "$ROOT/tests/host-check.sh" ]] && bash -n "$ROOT/tests/host-check.sh" \
   || fail "tests/host-check.sh missing, not executable, or bash -n failed"
 ! grep -qE '(^|[;&|[:space:]])(rm|mv|dd|mkfs|sgdisk|wipefs|tee|chmod|chown|sed -i|systemctl (start|stop|enable|disable|restart)) ' \
   "$ROOT/tests/host-check.sh" || fail "host-check.sh must stay read-only"
 
-grep -q 'amd_iommu=on' "$ROOT/install.sh" || fail "missing amd_iommu=on"
-grep -q 'amd_pstate=active' "$ROOT/install.sh" || fail "missing amd_pstate=active"
-grep -q 'UCODE=amd-ucode' "$ROOT/install.sh" || fail "must support amd-ucode for t14s"
-grep -q 'UCODE=intel-ucode' "$ROOT/install.sh" || fail "must support intel-ucode for p15"
-grep -q 'HW_PROFILE' "$ROOT/install.sh" || fail "must define HW_PROFILE"
-grep -q 'intel_iommu=on' "$ROOT/install.sh" || fail "p15 path must set intel_iommu=on"
-grep -q 'firewalld' "$ROOT/install.sh" || fail "must install/enable firewalld"
-grep -q 'systemctl mask ufw' "$ROOT/install.sh" \
-  || fail "must mask ufw when enabling firewalld"
-grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$ROOT/install.sh" \
-  && grep -q 'systemctl enable.*\bufw\b' "$ROOT/install.sh" \
-  && fail "must not enable ufw" || true
-grep -q 'ollama.service.d' "$ROOT/install.sh" || fail "must ship ollama override for P15"
-grep -q 'OLLAMA_HOST=127.0.0.1:11434' "$ROOT/install.sh" || fail "ollama must bind localhost"
+grep -q 'amd_iommu=on' "$INSTALL_SH" || fail "missing amd_iommu=on"
+grep -q 'amd_pstate=active' "$INSTALL_SH" || fail "missing amd_pstate=active"
+grep -q 'UCODE=amd-ucode' "$INSTALL_SH" || fail "must support amd-ucode for t14s"
+grep -q 'UCODE=intel-ucode' "$INSTALL_SH" || fail "must support intel-ucode for p15"
+grep -q 'HW_PROFILE' "$INSTALL_SH" || fail "must define HW_PROFILE"
+grep -q 'intel_iommu=on' "$INSTALL_SH" || fail "p15 path must set intel_iommu=on"
+grep -q 'firewalld' "$INSTALL_SH" || fail "must install/enable firewalld"
 
-grep -q 'username cannot be empty' "$ROOT/install.sh" || fail "must reject empty username"
-grep -q "username cannot be 'root'" "$ROOT/install.sh" || fail "must reject username root"
-grep -q '^valid_username()' "$ROOT/install.sh" || fail "must define valid_username"
-grep -q '^valid_timezone()' "$ROOT/install.sh" || fail "must define valid_timezone"
-grep -q '^valid_keymap()' "$ROOT/install.sh" || fail "must define valid_keymap"
-grep -q 'grep -qxF --' "$ROOT/install.sh" || fail "keymap match must be fixed-string (-F)"
-grep -q 'getent group' "$ROOT/install.sh" || fail "username must reject existing groups"
-grep -q 'TZif' "$ROOT/install.sh" || fail "timezone must require TZif magic"
-grep -q '.install-secrets' "$ROOT/install.sh" || fail "must use secrets file (not env passwords)"
-grep -q 'USER_PASS=' "$ROOT/install.sh" && grep -q 'arch-chroot /mnt env' "$ROOT/install.sh" \
-  && grep 'arch-chroot /mnt env' -A3 "$ROOT/install.sh" | grep -q 'USER_PASS=' \
+grep -q 'configure_firewalld' "$INSTALL_SH" || fail "must define configure_firewalld"
+grep -q 'DefaultZone=drop' "$INSTALL_SH" || fail "must set firewalld DefaultZone=drop"
+grep -q 'T14S_LIB_DIR' "$ROOT/install.sh" || fail "orchestrator must support T14S_LIB_DIR"
+grep -q '70-firewall.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 70-firewall.sh"
+grep -q '80-chroot-setup.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 80-chroot-setup.sh"
+grep -q 'systemctl mask ufw' "$INSTALL_SH" \
+  || fail "must mask ufw when enabling firewalld"
+grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$INSTALL_SH" \
+  && grep -q 'systemctl enable.*\bufw\b' "$INSTALL_SH" \
+  && fail "must not enable ufw" || true
+grep -q 'ollama.service.d' "$INSTALL_SH" || fail "must ship ollama override for P15"
+grep -q 'OLLAMA_HOST=127.0.0.1:11434' "$INSTALL_SH" || fail "ollama must bind localhost"
+
+grep -q 'username cannot be empty' "$INSTALL_SH" || fail "must reject empty username"
+grep -q "username cannot be 'root'" "$INSTALL_SH" || fail "must reject username root"
+grep -q '^valid_username()' "$INSTALL_SH" || fail "must define valid_username"
+grep -q '^valid_timezone()' "$INSTALL_SH" || fail "must define valid_timezone"
+grep -q '^valid_keymap()' "$INSTALL_SH" || fail "must define valid_keymap"
+grep -q 'grep -qxF --' "$INSTALL_SH" || fail "keymap match must be fixed-string (-F)"
+grep -q 'getent group' "$INSTALL_SH" || fail "username must reject existing groups"
+grep -q 'TZif' "$INSTALL_SH" || fail "timezone must require TZif magic"
+grep -q '.install-secrets' "$INSTALL_SH" || fail "must use secrets file (not env passwords)"
+grep -q 'USER_PASS=' "$INSTALL_SH" && grep -q 'arch-chroot /mnt env' "$INSTALL_SH" \
+  && grep 'arch-chroot /mnt env' -A3 "$INSTALL_SH" | grep -q 'USER_PASS=' \
   && fail "must not pass USER_PASS via arch-chroot env" || true
 
-grep -q 'com.google.Chrome' "$ROOT/install.sh" \
-  && grep -A2 'for app in' "$ROOT/install.sh" | grep -q 'com.google.Chrome' \
+grep -q 'com.google.Chrome' "$INSTALL_SH" \
+  && grep -A2 'for app in' "$INSTALL_SH" | grep -q 'com.google.Chrome' \
   && fail "Chrome must not be in chroot flatpak loop" || true
 
-grep -q 'LOGIN_HINT' "$ROOT/install.sh" || fail "finish banner must gate on DESKTOP"
-grep -q 'AuthenticAMD' "$ROOT/install.sh" || fail "must gate T14s on AuthenticAMD"
-grep -q 'GenuineIntel' "$ROOT/install.sh" || fail "must gate P15 on GenuineIntel"
-grep -qF '21C[QR]' "$ROOT/install.sh" || fail "DMI check must use anchored 21C[QR]"
-grep -qF '20SU' "$ROOT/install.sh" || fail "DMI check must detect P15 20SU"
-grep -q 'target profile: T14s Gen 3 AMD' "$ROOT/install.sh" \
+grep -q 'LOGIN_HINT' "$INSTALL_SH" || fail "finish banner must gate on DESKTOP"
+grep -q 'AuthenticAMD' "$INSTALL_SH" || fail "must gate T14s on AuthenticAMD"
+grep -q 'GenuineIntel' "$INSTALL_SH" || fail "must gate P15 on GenuineIntel"
+grep -qF '21C[QR]' "$INSTALL_SH" || fail "DMI check must use anchored 21C[QR]"
+grep -qF '20SU' "$INSTALL_SH" || fail "DMI check must detect P15 20SU"
+grep -q 'target profile: T14s Gen 3 AMD' "$INSTALL_SH" \
   || fail "must print T14s target profile"
-grep -q 'target profile: P15 Gen 1' "$ROOT/install.sh" \
+grep -q 'target profile: P15 Gen 1' "$INSTALL_SH" \
   || fail "must print P15 target profile"
-grep -q 'HW_PROFILE=t14s' "$ROOT/install.sh" || fail "must set HW_PROFILE=t14s on 21CQ/21CR"
-grep -q 'HW_PROFILE=p15' "$ROOT/install.sh" || fail "must set HW_PROFILE=p15 on 20SU"
-grep -q 'vulkan-radeon' "$ROOT/install.sh" || fail "must pacstrap vulkan-radeon"
-grep -q 'mesa' "$ROOT/install.sh" || fail "must pacstrap mesa"
-grep -q 'libva-utils' "$ROOT/install.sh" || fail "must install libva-utils with GNOME"
-grep -q '_libva=radeonsi' "$ROOT/install.sh" \
+grep -q 'HW_PROFILE=t14s' "$INSTALL_SH" || fail "must set HW_PROFILE=t14s on 21CQ/21CR"
+grep -q 'HW_PROFILE=p15' "$INSTALL_SH" || fail "must set HW_PROFILE=p15 on 20SU"
+grep -q 'vulkan-radeon' "$INSTALL_SH" || fail "must pacstrap vulkan-radeon"
+grep -q 'mesa' "$INSTALL_SH" || fail "must pacstrap mesa"
+grep -q 'libva-utils' "$INSTALL_SH" || fail "must install libva-utils with GNOME"
+grep -q '_libva=radeonsi' "$INSTALL_SH" \
   || fail "must default LIBVA to radeonsi for T14s"
-grep -q '_libva=iHD' "$ROOT/install.sh" \
+grep -q '_libva=iHD' "$INSTALL_SH" \
   || fail "must set LIBVA iHD for P15"
-grep -q 'LIBVA_DRIVER_NAME=${_libva}' "$ROOT/install.sh" \
+grep -q 'LIBVA_DRIVER_NAME=${_libva}' "$INSTALL_SH" \
   || fail "must write LIBVA_DRIVER_NAME from HW_PROFILE"
-grep -q '61-gdm-wayland.rules' "$ROOT/install.sh" \
+grep -q '61-gdm-wayland.rules' "$INSTALL_SH" \
   || fail "must install 61-gdm-wayland.rules for AMD 0x1002/0x1681"
 # GDM hardening: check the actual heredoc bodies, not just any line in install.sh.
-_heredoc() { awk -v t="$1" 'index($0, "cat > " t " <<\x27EOF\x27"){f=1;next} f&&/^EOF$/{exit} f' "$ROOT/install.sh"; }
+_heredoc() { awk -v t="$1" 'index($0, "cat > " t " <<\x27EOF\x27"){f=1;next} f&&/^EOF$/{exit} f' "$INSTALL_SH"; }
 _gdmconf="$(_heredoc /etc/gdm/custom.conf)"
 grep -qx 'DisallowTCP=true' <<<"$_gdmconf" || fail "gdm custom.conf must set DisallowTCP=true"
 grep -qx 'AutomaticLoginEnable=false' <<<"$_gdmconf" || fail "gdm custom.conf must disable autologin"
@@ -79,7 +99,7 @@ grep -qx 'disable-user-list=true' <<<"$_greeter" || fail "GDM greeter dconf must
 # idle-delay is an org.gnome.desktop.session key; under login-screen it is ignored.
 awk '/^\[/{s=$0} /^idle-delay=/{print s}' <<<"$_greeter" | grep -qx '\[org/gnome/desktop/session\]' \
   || fail "greeter idle-delay must live under [org/gnome/desktop/session]"
-grep -q 'enable-fingerprint-authentication=false' "$ROOT/install.sh" \
+grep -q 'enable-fingerprint-authentication=false' "$INSTALL_SH" \
   || fail "greeter fingerprint auth must be disabled on SKIP_THINKPAD_HW"
 if command -v dconf >/dev/null; then
   _d="$(mktemp -d)"
@@ -87,32 +107,32 @@ if command -v dconf >/dev/null; then
   dconf compile "$_d/db" "$_d" || fail "GDM greeter dconf keyfile must compile"
   rm -rf "$_d"
 fi
-grep -q 'check gdm_dconf' "$ROOT/install.sh" || fail "t14s-selftest must check the compiled GDM dconf db"
+grep -q 'check gdm_dconf' "$INSTALL_SH" || fail "t14s-selftest must check the compiled GDM dconf db"
 # The GDM block must sit inside the DESKTOP guard (headless installs have no gdm).
-awk '/^if yn_on "\$DESKTOP"; then$/{d=1} d&&/^fi$/{d=0} /cat > \/etc\/gdm\/custom\.conf/{print d+0; exit}' "$ROOT/install.sh" \
+awk '/^if yn_on "\$DESKTOP"; then$/{d=1} d&&/^fi$/{d=0} /cat > \/etc\/gdm\/custom\.conf/{print d+0; exit}' "$INSTALL_SH" \
   | grep -qx 1 || fail "GDM config must be written inside the DESKTOP guard"
-grep -q 'gdm.service.d/override.conf' "$ROOT/install.sh" \
+grep -q 'gdm.service.d/override.conf' "$INSTALL_SH" \
   || fail "must install GDM systemd override.conf"
-grep -q '99-wayland.conf' "$ROOT/install.sh" \
+grep -q '99-wayland.conf' "$INSTALL_SH" \
   || fail "must install /etc/environment.d/99-wayland.conf"
-grep -q 'x86-64-v3' "$ROOT/install.sh" \
+grep -q 'x86-64-v3' "$INSTALL_SH" \
   || fail "makepkg t14s.conf must tune for Zen 3+ x86-64-v3"
-grep -q 'GOAMD64="\${GOAMD64:-v3}"' "$ROOT/install.sh" \
+grep -q 'GOAMD64="\${GOAMD64:-v3}"' "$INSTALL_SH" \
   || fail "makepkg t14s.conf must set GOAMD64=v3"
-grep -q 's2idle.conf' "$ROOT/install.sh" \
+grep -q 's2idle.conf' "$INSTALL_SH" \
   || fail "must install /etc/systemd/sleep.conf.d/s2idle.conf"
-grep -q 'thinkpad-lid.conf' "$ROOT/install.sh" \
+grep -q 'thinkpad-lid.conf' "$INSTALL_SH" \
   || fail "must install /etc/systemd/logind.conf.d/thinkpad-lid.conf"
-grep -q '61-thinkpad-charge-limit.rules' "$ROOT/install.sh" \
+grep -q '61-thinkpad-charge-limit.rules' "$INSTALL_SH" \
   || fail "must install 61-thinkpad-charge-limit.rules (UPower CHARGE_LIMIT=70,80)"
-grep -q 'ENV{CHARGE_LIMIT}="70,80"' "$ROOT/install.sh" \
+grep -q 'ENV{CHARGE_LIMIT}="70,80"' "$INSTALL_SH" \
   || fail "61-thinkpad-charge-limit.rules must export CHARGE_LIMIT=70,80"
-grep -q '71-thinkpad-t14s-touchpad-wakeup.rules' "$ROOT/install.sh" \
+grep -q '71-thinkpad-t14s-touchpad-wakeup.rules' "$INSTALL_SH" \
   || fail "must install 71-thinkpad-t14s-touchpad-wakeup.rules"
-grep -q 'i2c-ELAN0678:\*|i2c-SYNA8018:\*' "$ROOT/install.sh" \
+grep -q 'i2c-ELAN0678:\*|i2c-SYNA8018:\*' "$INSTALL_SH" \
   || fail "touchpad wakeup rule must match ELAN0678 and SYNA8018"
 # Functional check: extract /etc/makepkg.conf.d/t14s.conf and /usr/local/bin/t14s-selftest
-_mkconf="$(awk '/^cat > \/etc\/makepkg\.conf\.d\/t14s\.conf <<\x27EOF\x27$/{f=1;next} f&&/^EOF$/{exit} f' "$ROOT/install.sh")"
+_mkconf="$(awk '/^cat > \/etc\/makepkg\.conf\.d\/t14s\.conf <<\x27EOF\x27$/{f=1;next} f&&/^EOF$/{exit} f' "$INSTALL_SH")"
 [[ -n $_mkconf ]] || fail "could not extract makepkg.conf.d/t14s.conf heredoc"
 bash -c '
   set -euo pipefail
@@ -126,35 +146,40 @@ bash -c '
   [[ $GOAMD64 == "v3" ]] || exit 14
 ' _ "$_mkconf" || fail "makepkg.conf.d/t14s.conf runtime flag rewrite failed"
 unset -v _mkconf
-_stbody="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<\x27ST\x27$/{f=1;next} f&&/^ST$/{exit} f' "$ROOT/install.sh")"
+_stbody="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<\x27ST\x27$/{f=1;next} f&&/^ST$/{exit} f' "$INSTALL_SH")"
 [[ -n $_stbody ]] || fail "could not extract t14s-selftest heredoc"
 bash -n <<<"$_stbody" || fail "t14s-selftest bash -n failed"
 grep -qE '^check .*\|' <<<"$_stbody" \
   && fail "t14s-selftest must not pipe check() into another command (subshell loses ok/bad counter)" || true
 unset -v _stbody
-grep -q 'thinkpad-charge-thresholds.conf' "$ROOT/install.sh" \
+grep -q 'thinkpad-charge-thresholds.conf' "$INSTALL_SH" \
   || fail "must install charge threshold tmpfiles"
-grep -q 'charge_control_start_threshold - - - - 70' "$ROOT/install.sh" \
+grep -q 'charge_control_start_threshold - - - - 70' "$INSTALL_SH" \
   || fail "charge tmpfiles must set start 70"
-grep -q 'charge_control_end_threshold - - - - 80' "$ROOT/install.sh" \
+grep -q 'charge_control_end_threshold - - - - 80' "$INSTALL_SH" \
   || fail "charge tmpfiles must set end 80"
-grep -q 'thinkpad-charge-thresholds.service' "$ROOT/install.sh" \
+grep -q 'thinkpad-charge-thresholds.service' "$INSTALL_SH" \
   || fail "must ship charge oneshot after multi-user"
-grep -q 'After=multi-user.target' "$ROOT/install.sh" \
+grep -q 'After=multi-user.target' "$INSTALL_SH" \
   || fail "charge oneshot must After=multi-user.target"
-grep -q 'apply-charge-thresholds.sh' "$ROOT/install.sh" \
+grep -q 'apply-charge-thresholds.sh' "$INSTALL_SH" \
   || fail "must install apply-charge-thresholds.sh"
-grep -qF '/usr/local/lib/thinkpad/apply-charge-thresholds.sh' "$ROOT/install.sh" \
+grep -qF '/usr/local/lib/thinkpad/apply-charge-thresholds.sh' "$INSTALL_SH" \
   || fail "charge apply path must be /usr/local/lib/thinkpad/ (dotfiles parity)"
-grep -q '/usr/local/lib/t14s/' "$ROOT/install.sh" \
+grep -q '/usr/local/lib/t14s/' "$INSTALL_SH" \
   && fail "must not use legacy /usr/local/lib/t14s/" || true
 # set -e / ERR: top-level functions must not end on a bare failing && list.
-python3 - "$ROOT/install.sh" <<'PY' || fail "top-level function ends with failing && (set -e hazard)"
+python3 - "$INSTALL_SH" <<'PY' || fail "top-level function ends with failing && (set -e hazard)"
 from pathlib import Path
 import re, sys
 t = Path(sys.argv[1]).read_text().splitlines()
-# Stop before chroot heredoc (redefines helpers under different rules).
-cut = next((i for i, ln in enumerate(t) if ln.startswith("cat > /mnt/root/chroot-setup.sh")), len(t))
+# Stop before chroot deploy (chroot helpers live in lib/80, different rules).
+cut = next((i for i, ln in enumerate(t) if "80-chroot-setup.sh" in ln and "deploy" in ln.lower() or ln.strip().endswith("80-chroot-setup.sh")), len(t))
+# Prefer explicit deploy marker if present.
+for i, ln in enumerate(t):
+    if "_deploy_lib 80-chroot-setup.sh" in ln or ln.startswith("cat > /mnt/root/chroot-setup.sh"):
+        cut = i
+        break
 t = t[:cut]
 bad = []
 i = 0
@@ -187,37 +212,36 @@ if bad:
     raise SystemExit('&&-tailed functions:\n  ' + '\n  '.join(bad))
 print('ok no &&-tailed top-level functions')
 PY
-grep -qF '_host_short=${HOSTNAME%%.*}' "$ROOT/install.sh" \
+grep -qF '_host_short=${HOSTNAME%%.*}' "$INSTALL_SH" \
   || fail "FQDN hostname must derive short label"
-grep -qF '127.0.1.1 ${HOSTNAME} ${_host_short}' "$ROOT/install.sh" \
+grep -qF '127.0.1.1 ${HOSTNAME} ${_host_short}' "$INSTALL_SH" \
   || fail "FQDN hosts entry must list FQDN before short name"
 
 # reflector rate-sort must be concurrency + time bounded, or a few dead mirrors
 # serialize into a multi-minute blank screen
-grep -q -- '--sort rate' "$ROOT/install.sh" || fail "reflector rate sort missing"
-grep -q 'timeout [0-9]* reflector' "$ROOT/install.sh" || fail "live reflector run must have an overall timeout"
-grep -q -- '--threads 5' "$ROOT/install.sh" || fail "reflector ranking must be concurrent"
+grep -q -- '--sort rate' "$INSTALL_SH" || fail "reflector rate sort missing"
+grep -q 'timeout [0-9]* reflector' "$INSTALL_SH" || fail "live reflector run must have an overall timeout"
+grep -q -- '--threads 5' "$INSTALL_SH" || fail "reflector ranking must be concurrent"
 
 # TUI: backend bootstrap + semantic helpers must exist, plus plain fallback
 grep -q '### Controls' "$ROOT/README.md" || fail "README must document TUI controls"
 grep -q '### Safety model' "$ROOT/README.md" || fail "README must document the safety model"
-grep -q 'command -v whiptail' "$ROOT/install.sh" || fail "must detect whiptail"
-grep -q 'command -v dialog' "$ROOT/install.sh" || fail "must detect/install dialog"
-grep -q -- '--passwordbox' "$ROOT/install.sh" || fail "passwords must use a TUI prompt"
-grep -q 'ui_yesno' "$ROOT/install.sh" || fail "choices must use ui_yesno"
-grep -q 'T14S_DRYRUN' "$ROOT/install.sh" || fail "must keep a dry-run stop point"
-grep -q 'run_progress' "$ROOT/install.sh" || fail "must define run_progress for live pacstrap output"
-grep -q 'run_gauge "pacstrap' "$ROOT/install.sh" \
+grep -q 'command -v whiptail' "$INSTALL_SH" || fail "must detect whiptail"
+grep -q 'command -v dialog' "$INSTALL_SH" || fail "must detect/install dialog"
+grep -q -- '--passwordbox' "$INSTALL_SH" || fail "passwords must use a TUI prompt"
+grep -q 'ui_yesno' "$INSTALL_SH" || fail "choices must use ui_yesno"
+grep -q 'T14S_DRYRUN' "$INSTALL_SH" || fail "must keep a dry-run stop point"
+grep -q 'run_progress' "$INSTALL_SH" || fail "must define run_progress for live pacstrap output"
+grep -q 'run_gauge "pacstrap' "$INSTALL_SH" \
   || fail "pacstrap must use run_gauge (percent gauge, live on plain TTY)"
-grep -q 'run_gauge "chroot config' "$ROOT/install.sh" \
+grep -q 'run_gauge "chroot config' "$INSTALL_SH" \
   || fail "chroot must use run_gauge"
 
 # progress_filter: pacman/curl/stage lines → monotonic gauge percent per band
-python3 - "$ROOT/install.sh" <<'PY' || fail "chroot stage markers must be ascending, 0→100, contiguous"
+python3 - "$ROOT/lib/80-chroot-setup.sh" <<'PY' || fail "chroot stage markers must be ascending, 0→100, contiguous"
 import re, sys
 t = open(sys.argv[1]).read()
-i = t.index("cat > /mnt/root/chroot-setup.sh <<'CHROOT'"); j = t.index('\nCHROOT\n', i)
-st = [(int(a), int(b)) for a, b in re.findall(r'^stage (\d+) (\d+) "', t[i:j], re.M)]
+st = [(int(a), int(b)) for a, b in re.findall(r'^stage (\d+) (\d+) "', t, re.M)]
 assert len(st) >= 8, st
 assert st[0][0] == 0 and st[-1][1] == 100, st
 for (a, b), (c, d) in zip(st, st[1:]):
@@ -233,7 +257,7 @@ _pf_out="$(bash -c '
     printf "(1/2) checking keys in keyring\n(2/2) installing b\n(1/1) Updating initcpios...\n"
     printf "@@STAGE 34 72 GNOME\n(100/100) installing gnome-shell\n"
   } | progress_filter 0 100 gauge step | awk "p==\"XXX\" && /^[0-9]+\$/{print} {p=\$0}"
-' _ "$ROOT/install.sh")"
+' _ "$INSTALL_SH")"
 [[ "$(printf '%s\n' "$_pf_out" | tr '\n' ' ')" == "0 20 40 45 95 99 34 70 " ]] \
   || fail "progress_filter percents wrong: $(printf '%s\n' "$_pf_out" | tr '\n' ' ')"
 echo "ok progress_filter percents"
@@ -247,7 +271,7 @@ _pf_edge="$(bash -c '
     | progress_filter 0 100 gauge step "HINT-LINE" | tr "\n" "|"
   echo
   printf "@@STAGE 34 72 GNOME\nraw line\n" | progress_filter 0 100 text step
-' _ "$ROOT/install.sh")"
+' _ "$INSTALL_SH")"
 grep -q '|20|step||working…|downloading packages (1/2)||HINT-LINE|XXX|' <<<"$_pf_edge" \
   || fail "progress_filter: VerbosePkgLists header or caption hint broken: $_pf_edge"
 [[ $(grep -c 'HINT-LINE' <<<"$(tr '|' '\n' <<<"$_pf_edge")") == 2 ]] \
@@ -281,7 +305,7 @@ rc=0
 run_gauge "step label" 34 72 bash -c 'printf "(1/2) installing a\n"; exit 7' || rc=$?
 echo "rc=$rc" >"$RG_DIR/rc"
 RUN
-  RG_DIR="$_rg" PATH="$_rg/bin:$PATH" script -qec "bash $_rg/run.sh $ROOT/install.sh" /dev/null \
+  RG_DIR="$_rg" PATH="$_rg/bin:$PATH" script -qec "bash $_rg/run.sh $INSTALL_SH" /dev/null \
     >/dev/null 2>&1 || true
   grep -qx 'rc=7' "$_rg/rc" 2>/dev/null || fail "run_gauge must return the command exit status"
   grep -qx -- '--gauge' "$_rg/args" || fail "run_gauge must call dialog --gauge"
@@ -299,7 +323,7 @@ fi
 # Palette readability on the 8-colour Linux console (ISO):
 #   dialogrc: no BLACK foreground with highlight ON (renders dark grey)
 #   newt:     no bright/"yellow"/"white" background; only S-Lang colour names
-python3 - "$ROOT/install.sh" <<'PY' || fail "TUI palette breaks console readability rules"
+python3 - "$INSTALL_SH" <<'PY' || fail "TUI palette breaks console readability rules"
 import re, sys
 t = open(sys.argv[1]).read()
 bad = re.findall(r'\(BLACK,[A-Z]+,ON\)', t)
@@ -317,46 +341,46 @@ for blk in re.findall(r"^NEWT_COLORS_[A-Z]+='\n(.*?)\n'", t, re.S | re.M):
 assert 'NEWT_COLORS="${NEWT_COLORS_BASE}${TUI_NEWT:-}"' in t, 'severity overlays must extend base'
 print('ok TUI palette rules')
 PY
-grep -q 'ui_view_log' "$ROOT/install.sh" || fail "must offer ui_view_log"
-grep -q 'ui_checklist' "$ROOT/install.sh" || fail "must offer ui_checklist multi-select"
-grep -q 'ui_info' "$ROOT/install.sh" || fail "must define ui_info"
-grep -q 'ui_warn' "$ROOT/install.sh" || fail "must define ui_warn"
-grep -q 'ui_error' "$ROOT/install.sh" || fail "must define ui_error"
-grep -q 'ui_critical' "$ROOT/install.sh" || fail "must define ui_critical"
-grep -q 'ui_ok' "$ROOT/install.sh" || fail "must define ui_ok"
-grep -q 'write_dialogrc' "$ROOT/install.sh" || fail "must ship dialogrc theme"
-grep -q 'DIALOG_RC_CRITICAL' "$ROOT/install.sh" || fail "must ship per-severity dialogrc"
-grep -q 'NEWT_COLORS_CRITICAL' "$ROOT/install.sh" || fail "must ship severity NEWT palettes"
-grep -q 'NEWT_COLORS_OK' "$ROOT/install.sh" || fail "must ship green OK NEWT palette"
-grep -q 'msg_height' "$ROOT/install.sh" || fail "must scale msgbox height with content"
-grep -q 'TUI_KEEP_STDIN=1' "$ROOT/install.sh" || fail "progressbox must keep pipe stdin"
-grep -q 'ui_critical' "$ROOT/install.sh" && grep -A20 '^die()' "$ROOT/install.sh" | grep -q 'ui_critical' \
+grep -q 'ui_view_log' "$INSTALL_SH" || fail "must offer ui_view_log"
+grep -q 'ui_checklist' "$INSTALL_SH" || fail "must offer ui_checklist multi-select"
+grep -q 'ui_info' "$INSTALL_SH" || fail "must define ui_info"
+grep -q 'ui_warn' "$INSTALL_SH" || fail "must define ui_warn"
+grep -q 'ui_error' "$INSTALL_SH" || fail "must define ui_error"
+grep -q 'ui_critical' "$INSTALL_SH" || fail "must define ui_critical"
+grep -q 'ui_ok' "$INSTALL_SH" || fail "must define ui_ok"
+grep -q 'write_dialogrc' "$INSTALL_SH" || fail "must ship dialogrc theme"
+grep -q 'DIALOG_RC_CRITICAL' "$INSTALL_SH" || fail "must ship per-severity dialogrc"
+grep -q 'NEWT_COLORS_CRITICAL' "$INSTALL_SH" || fail "must ship severity NEWT palettes"
+grep -q 'NEWT_COLORS_OK' "$INSTALL_SH" || fail "must ship green OK NEWT palette"
+grep -q 'msg_height' "$INSTALL_SH" || fail "must scale msgbox height with content"
+grep -q 'TUI_KEEP_STDIN=1' "$INSTALL_SH" || fail "progressbox must keep pipe stdin"
+grep -q 'ui_critical' "$INSTALL_SH" && grep -A20 '^die()' "$INSTALL_SH" | grep -q 'ui_critical' \
   || fail "die must show ui_critical"
-grep -q '\[severity\]' "$ROOT/install.sh" || fail "ui_yesno must document severity arg"
-grep -q '\[ERROR\]' "$ROOT/install.sh" || fail "plain yesno must label error distinctly from critical"
-grep -q 'log "View install log" off' "$ROOT/install.sh" || fail "checklist must offer log entry"
-grep -q -- '--colors' "$ROOT/install.sh" || fail "dialog must enable --colors"
+grep -q '\[severity\]' "$INSTALL_SH" || fail "ui_yesno must document severity arg"
+grep -q '\[ERROR\]' "$INSTALL_SH" || fail "plain yesno must label error distinctly from critical"
+grep -q 'log "View install log" off' "$INSTALL_SH" || fail "checklist must offer log entry"
+grep -q -- '--colors' "$INSTALL_SH" || fail "dialog must enable --colors"
 grep -q 'Message severity' "$ROOT/README.md" || fail "README must document message severity"
 grep -q 'per-severity' "$ROOT/README.md" || fail "README must note per-severity dialogrc/NEWT"
-grep -q 'ui_step' "$ROOT/install.sh" || fail "wizard must set ui_step progress"
-grep -q 'ui_backtitle' "$ROOT/install.sh" || fail "tui must use dynamic backtitle"
-grep -q 'ui_fold' "$ROOT/install.sh" || fail "messages must fold prose"
-grep -q '_tui_btns' "$ROOT/install.sh" || fail "must set Next/Abort/Erase button labels"
-grep -q 'erase_yesno' "$ROOT/install.sh" || fail "wipe confirms need erase_yesno buttons"
-grep -q 'critical_yesno' "$ROOT/install.sh" || fail "hard gates need critical_yesno buttons"
-grep -q 'TUI_STEPS=11' "$ROOT/install.sh" || fail "wizard must declare 11 steps"
+grep -q 'ui_step' "$INSTALL_SH" || fail "wizard must set ui_step progress"
+grep -q 'ui_backtitle' "$INSTALL_SH" || fail "tui must use dynamic backtitle"
+grep -q 'ui_fold' "$INSTALL_SH" || fail "messages must fold prose"
+grep -q '_tui_btns' "$INSTALL_SH" || fail "must set Next/Abort/Erase button labels"
+grep -q 'erase_yesno' "$INSTALL_SH" || fail "wipe confirms need erase_yesno buttons"
+grep -q 'critical_yesno' "$INSTALL_SH" || fail "hard gates need critical_yesno buttons"
+grep -q 'TUI_STEPS=11' "$INSTALL_SH" || fail "wizard must declare 11 steps"
 grep -q 'not color-only' "$ROOT/README.md" || fail "README must note a11y severity badges"
 grep -q 'Next' "$ROOT/README.md" || fail "README Controls must document Next button"
 grep -q 'ui_yesno` only' "$ROOT/README.md" \
   || fail "README must mark erase/critical confirms as ui_yesno-only"
-grep -q 'NONINTERACTIVE: skipping welcome TUI' "$ROOT/install.sh" \
+grep -q 'NONINTERACTIVE: skipping welcome TUI' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must skip welcome TUI"
-grep -q 'choose 1-\$i (empty=1)' "$ROOT/install.sh" \
+grep -q 'choose 1-\$i (empty=1)' "$INSTALL_SH" \
   || fail "plain menu must not claim Ctrl-C is Esc"
-grep -q -- '--progressbox' "$ROOT/install.sh" || fail "dialog progressbox for live steps"
+grep -q -- '--progressbox' "$INSTALL_SH" || fail "dialog progressbox for live steps"
 # Button roles: wipe uses erase; DMI/hook hard gates use critical (not Erase).
 # Non-spanning parse: one quoted prompt per ui_yesno (no nested " inside prompts).
-python3 - "$ROOT/install.sh" <<'PY' || fail "yesno button roles must separate erase vs continue"
+python3 - "$INSTALL_SH" <<'PY' || fail "yesno button roles must separate erase vs continue"
 from pathlib import Path
 import re, sys
 t = Path(sys.argv[1]).read_text()
@@ -438,7 +462,7 @@ if command -v whiptail >/dev/null 2>&1; then
     || fail "installed whiptail missing --ok-button"
 fi
 # progressbox path must not force </dev/tty on the same invocation
-python3 - "$ROOT/install.sh" <<'PY' || fail "progressbox must use TUI_KEEP_STDIN around tui"
+python3 - "$INSTALL_SH" <<'PY' || fail "progressbox must use TUI_KEEP_STDIN around tui"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
@@ -449,39 +473,39 @@ assert "TUI_KEEP_STDIN=1" in window, "TUI_KEEP_STDIN=1 missing before progressbo
 assert "TUI_KEEP_STDIN=0" in t[i:i + 120], "TUI_KEEP_STDIN=0 missing after progressbox"
 print("ok progressbox stdin")
 PY
-grep -q 'log "View install log"' "$ROOT/install.sh" \
+grep -q 'log "View install log"' "$INSTALL_SH" \
   || fail "menus must expose log viewer entry"
-grep -q 'sshd "Enable SSH' "$ROOT/install.sh" \
+grep -q 'sshd "Enable SSH' "$INSTALL_SH" \
   || fail "checklist must offer sshd option"
-grep -q 'pick_keymap' "$ROOT/install.sh" || fail "must offer archfi-style keymap picker"
-grep -q 'pick_timezone' "$ROOT/install.sh" || fail "must offer archfi-style timezone picker"
-grep -q 'pt-latin1' "$ROOT/install.sh" || fail "common keymaps must use real map names"
-grep -q 'br-abnt2' "$ROOT/install.sh" || fail "common keymaps must use real map names"
-grep -q 'jp106' "$ROOT/install.sh" || fail "common keymaps must use real map names"
-grep -q 'browse_args' "$ROOT/install.sh" || fail "keymap browse must not clobber commons menu"
-grep -q "s/\\\\.map(\\\\.gz)?\\$//" "$ROOT/install.sh" \
-  || grep -q 's/\.map(\.gz)?$//' "$ROOT/install.sh" \
+grep -q 'pick_keymap' "$INSTALL_SH" || fail "must offer archfi-style keymap picker"
+grep -q 'pick_timezone' "$INSTALL_SH" || fail "must offer archfi-style timezone picker"
+grep -q 'pt-latin1' "$INSTALL_SH" || fail "common keymaps must use real map names"
+grep -q 'br-abnt2' "$INSTALL_SH" || fail "common keymaps must use real map names"
+grep -q 'jp106' "$INSTALL_SH" || fail "common keymaps must use real map names"
+grep -q 'browse_args' "$INSTALL_SH" || fail "keymap browse must not clobber commons menu"
+grep -q "s/\\\\.map(\\\\.gz)?\\$//" "$INSTALL_SH" \
+  || grep -q 's/\.map(\.gz)?$//' "$INSTALL_SH" \
   || fail "keymap browse must strip .map/.map.gz only (not %%.*)"
-! grep -q 'km=\${f%%\.\*}' "$ROOT/install.sh" \
+! grep -q 'km=\${f%%\.\*}' "$INSTALL_SH" \
   || fail "keymap browse must not use \${f%%.*}"
-grep -qF '/usr/share/zoneinfo/$tz' "$ROOT/install.sh" \
+grep -qF '/usr/share/zoneinfo/$tz' "$INSTALL_SH" \
   || fail "timezone validator must resolve under /usr/share/zoneinfo"
-grep -qF 'valid_timezone "$TIMEZONE"' "$ROOT/install.sh" \
+grep -qF 'valid_timezone "$TIMEZONE"' "$INSTALL_SH" \
   || fail "identity step must call valid_timezone"
-grep -qF 'valid_hostname "$HOSTNAME"' "$ROOT/install.sh" \
+grep -qF 'valid_hostname "$HOSTNAME"' "$INSTALL_SH" \
   || fail "identity step must call valid_hostname"
-grep -qF 'valid_locale "$LOCALE"' "$ROOT/install.sh" \
+grep -qF 'valid_locale "$LOCALE"' "$INSTALL_SH" \
   || fail "identity step must call valid_locale"
-grep -qF 'valid_keymap "$KEYMAP"' "$ROOT/install.sh" \
+grep -qF 'valid_keymap "$KEYMAP"' "$INSTALL_SH" \
   || fail "identity step must call valid_keymap"
-grep -qF 'valid_username "$USERNAME"' "$ROOT/install.sh" \
+grep -qF 'valid_username "$USERNAME"' "$INSTALL_SH" \
   || fail "identity step must call valid_username"
-grep -qF 'T14S_IDENTITY_OVERRIDES' "$ROOT/install.sh" \
+grep -qF 'T14S_IDENTITY_OVERRIDES' "$INSTALL_SH" \
   || fail "fixture overrides must be gated on T14S_IDENTITY_OVERRIDES"
-grep -qF 'cannot pick a timezone' "$ROOT/install.sh" \
+grep -qF 'cannot pick a timezone' "$INSTALL_SH" \
   || fail "pick_timezone must not invent UTC when zoneinfo is missing"
-grep -q 'LUKS_WIPE' "$ROOT/install.sh" || fail "must offer optional LUKS mapper wipe"
-grep -q 'PACMAN_PARALLEL' "$ROOT/install.sh" || fail "must offer ParallelDownloads choice"
+grep -q 'LUKS_WIPE' "$INSTALL_SH" || fail "must offer optional LUKS mapper wipe"
+grep -q 'PACMAN_PARALLEL' "$INSTALL_SH" || fail "must offer ParallelDownloads choice"
 # pacman_tune: behaviour on a stock-style pacman.conf (live ISO + target).
 _pt="$(mktemp)"
 cat >"$_pt" <<'CONF'
@@ -498,7 +522,7 @@ Include = /etc/pacman.d/mirrorlist
 #Include = /etc/pacman.d/mirrorlist
 CONF
 bash -c 'eval "$(sed -n "/^pacman_tune()/,/^}/p" "$1")"; pacman_tune "$2" 15 Y; pacman_tune "$2" 15 Y' \
-  _ "$ROOT/install.sh" "$_pt" || fail "pacman_tune failed"
+  _ "$INSTALL_SH" "$_pt" || fail "pacman_tune failed"
 grep -q '^XferCommand' "$_pt" && fail "pacman_tune must drop XferCommand (serializes downloads)" || true
 grep -qx 'ParallelDownloads = 15' "$_pt" || fail "pacman_tune must set ParallelDownloads"
 for _k in Color ILoveCandy VerbosePkgLists DisableDownloadTimeout '\[multilib\]'; do
@@ -507,9 +531,9 @@ done
 grep -q '^#\[multilib-testing\]' "$_pt" || fail "pacman_tune must not enable [multilib-testing]"
 [[ $(grep -c '^Include' "$_pt") == 2 ]] || fail "pacman_tune: only [multilib] Include uncommented"
 rm -f "$_pt"; unset -v _pt _k
-grep -qE '^[^#]*XferCommand = ' "$ROOT/install.sh" \
+grep -qE '^[^#]*XferCommand = ' "$INSTALL_SH" \
   && fail "installer must not add an XferCommand" || true
-grep -q 'declare -f pacman_tune >/mnt/root/t14s-lib.sh' "$ROOT/install.sh" \
+grep -q 'declare -f pacman_tune >/mnt/root/t14s-lib.sh' "$INSTALL_SH" \
   || fail "chroot must reuse host pacman_tune (no duplicate body)"
 echo "ok pacman_tune"
 
@@ -532,7 +556,7 @@ case "$*" in
 esac
 STUB
 chmod +x "$_pk/bin/pacman"
-_chroot_body="$(awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;next} f&&/^CHROOT$/{exit} f' "$ROOT/install.sh")"
+_chroot_body="$(cat "$ROOT/lib/80-chroot-setup.sh")"
 PK_DIR="$_pk" PATH="$_pk/bin:$PATH" bash -c '
   set -euo pipefail
   eval "$(printf "%s\n" "$1" | awk "/^WARN_FILE=/{f=1} f; /^source \\/root\\/t14s-lib.sh/{exit}" | grep -v "^source ")"
@@ -556,7 +580,7 @@ echo "ok pkg_try"
 
 # New option flags are wired end to end (answers, canonicalize, chroot env).
 for _fl in INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT; do
-  python3 - "$ROOT/install.sh" "$_fl" <<'PY' || fail "flag $_fl not wired everywhere"
+  python3 - "$INSTALL_SH" "$_fl" <<'PY' || fail "flag $_fl not wired everywhere"
 import re, sys
 t = open(sys.argv[1]).read(); f = sys.argv[2]
 keys = t[t.index('ANSWERS_KEYS=('):t.index(')', t.index('ANSWERS_KEYS=('))]
@@ -569,19 +593,19 @@ assert f'${{{f}:=N}}' in t, 'default'
 PY
 done
 unset -v _fl
-grep -q 'tuned tuned-ppd' "$ROOT/install.sh" || fail "GNOME + tuned must install tuned-ppd (replaces PPD)"
-grep -q 'tlp conflicts with tuned' "$ROOT/install.sh" || fail "tuned must force TLP off"
-grep -q 'runuser -u "$USERNAME" -- git clone --depth 1 https://aur.archlinux.org/yay-bin.git' "$ROOT/install.sh" \
+grep -q 'tuned tuned-ppd' "$INSTALL_SH" || fail "GNOME + tuned must install tuned-ppd (replaces PPD)"
+grep -q 'tlp conflicts with tuned' "$INSTALL_SH" || fail "tuned must force TLP off"
+grep -q 'runuser -u "$USERNAME" -- git clone --depth 1 https://aur.archlinux.org/yay-bin.git' "$INSTALL_SH" \
   || fail "yay must be built as the user (makepkg refuses root)"
-grep -vE '^\s*#' "$ROOT/install.sh" | grep -q 'NOPASSWD' \
+grep -vE '^\s*#' "$INSTALL_SH" | grep -q 'NOPASSWD' \
   && fail "installer must not grant sudoers NOPASSWD" || true
-grep -q 'rtkit evolution-data-server' "$ROOT/install.sh" || fail "GNOME needs rtkit + evolution-data-server"
-grep -q '^  wireless-regdb$' "$ROOT/install.sh" || fail "base needs wireless-regdb (regulatory.db)"
-grep -q 'install -m 600 "$LOG" /mnt/var/log/t14s-install.log' "$ROOT/install.sh" \
+grep -q 'rtkit evolution-data-server' "$INSTALL_SH" || fail "GNOME needs rtkit + evolution-data-server"
+grep -q '^  wireless-regdb$' "$INSTALL_SH" || fail "base needs wireless-regdb (regulatory.db)"
+grep -q 'install -m 600 "$LOG" /mnt/var/log/t14s-install.log' "$INSTALL_SH" \
   || fail "install log must be kept on the target"
-grep -q 'INSTALL COMPLETE with warnings' "$ROOT/install.sh" || fail "finish screen must surface warnings"
+grep -q 'INSTALL COMPLETE with warnings' "$INSTALL_SH" || fail "finish screen must surface warnings"
 # Flatpak apps are deferred to a first-boot oneshot (not downloaded in chroot).
-_chr="$(awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;next} f&&/^CHROOT$/{exit} f' "$ROOT/install.sh")"
+_chr="$(cat "$ROOT/lib/80-chroot-setup.sh")"
 grep -qE '^\s*flatpak install --system .*\$\{_fp_apps' <<<"$_chr" \
   && fail "chroot must not download Flatpak apps (first-boot service does)" || true
 grep -q 'systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.timer' <<<"$_chr" \
@@ -598,14 +622,14 @@ grep -qx 'OnBootSec=1min' <<<"$_fptmr" && grep -qx 'WantedBy=timers.target' <<<"
 grep -q 'TimeoutStartSec=30min' <<<"$_chr" || fail "flatpak oneshot timeout must be 30min"
 grep -q 'ConditionPathExists=!/var/lib/t14s/flatpak-apps.done' <<<"$_chr" || fail "flatpak service must be one-shot (stamp)"
 grep -q 'Restart=on-failure' <<<"$_chr" || fail "flatpak service must retry until online"
-grep -q 'SNAP_PAC_SKIP=y' "$ROOT/install.sh" || fail "chroot run must set SNAP_PAC_SKIP=y"
+grep -q 'SNAP_PAC_SKIP=y' "$INSTALL_SH" || fail "chroot run must set SNAP_PAC_SKIP=y"
 [[ $(grep -c 'NUMBER_LIMIT=10' <<<"$_chr") == 2 ]] || fail "snapper root and home must both set NUMBER_LIMIT=10"
 unset -v _chr
 echo "ok option wiring"
 
 # No full-screen colour flashes: one backdrop for every severity; newt
 # overlays never recolour root/window.
-python3 - "$ROOT/install.sh" <<'PY' || fail "TUI backdrop must be constant across severities"
+python3 - "$INSTALL_SH" <<'PY' || fail "TUI backdrop must be constant across severities"
 import re, sys
 t = open(sys.argv[1]).read()
 assert t.count('screen_color = $screen') == 1
@@ -615,76 +639,76 @@ for blk in re.findall(r"^NEWT_COLORS_(?!BASE)[A-Z]+='\n(.*?)\n'", t, re.S | re.M
         assert ln.split('=')[0] in ('border', 'title'), ln
 print('ok constant TUI backdrop')
 PY
-grep -q 'skip_reflector' "$ROOT/install.sh" || fail "checklist must offer skip reflector"
-grep -q 'INSTALL_CUPS' "$ROOT/install.sh" || fail "must offer archdi-style CUPS option"
-grep -q 'nerd_fonts' "$ROOT/install.sh" || fail "checklist must offer nerd_fonts"
-grep -q 'ttf-jetbrains-mono-nerd' "$ROOT/install.sh" || fail "must install JetBrains Mono Nerd"
-grep -q 'ttf-meslo-nerd' "$ROOT/install.sh" || fail "must install Meslo Nerd"
-grep -q 'ttf-nerd-fonts-symbols-common' "$ROOT/install.sh" || fail "must install nerd symbols"
-grep -q 'INSTALL_NERD_FONTS' "$ROOT/install.sh" || fail "must gate nerd fonts install"
-grep -A20 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'INSTALL_NERD_FONTS=' \
+grep -q 'skip_reflector' "$INSTALL_SH" || fail "checklist must offer skip reflector"
+grep -q 'INSTALL_CUPS' "$INSTALL_SH" || fail "must offer archdi-style CUPS option"
+grep -q 'nerd_fonts' "$INSTALL_SH" || fail "checklist must offer nerd_fonts"
+grep -q 'ttf-jetbrains-mono-nerd' "$INSTALL_SH" || fail "must install JetBrains Mono Nerd"
+grep -q 'ttf-meslo-nerd' "$INSTALL_SH" || fail "must install Meslo Nerd"
+grep -q 'ttf-nerd-fonts-symbols-common' "$INSTALL_SH" || fail "must install nerd symbols"
+grep -q 'INSTALL_NERD_FONTS' "$INSTALL_SH" || fail "must gate nerd fonts install"
+grep -A20 'arch-chroot /mnt env' "$INSTALL_SH" | grep -q 'INSTALL_NERD_FONTS=' \
   || fail "arch-chroot env must pass INSTALL_NERD_FONTS"
-grep -q 'answers_save' "$ROOT/install.sh" || fail "must save T14S answers file"
-grep -q 'answers_load' "$ROOT/install.sh" || fail "must load T14S_ANSWERS"
-grep -q 'T14S_NONINTERACTIVE' "$ROOT/install.sh" || fail "must honor T14S_NONINTERACTIVE"
-grep -q 'Install profile' "$ROOT/install.sh" || fail "must offer gnome/dev/minimal presets"
-grep -q 'smartctl -H' "$ROOT/install.sh" || fail "must SMART-check target disk"
-grep -q 'INSTALL_CLI' "$ROOT/install.sh" || fail "must offer CLI tools bundle"
-grep -q 'INSTALL_PODMAN' "$ROOT/install.sh" || fail "must offer podman"
-grep -q 'INSTALL_DOCKER' "$ROOT/install.sh" || fail "must offer docker"
-grep -q 'INSTALL_VIRT' "$ROOT/install.sh" || fail "must offer libvirt/qemu"
-grep -q 'INSTALL_AVAHI' "$ROOT/install.sh" || fail "must offer avahi"
-grep -q 'INSTALL_STARSHIP' "$ROOT/install.sh" || fail "must offer starship"
-grep -q 'POST_HOOK_URL' "$ROOT/install.sh" || fail "must offer post-install hook URL"
-grep -q 'prefer-dark' "$ROOT/install.sh" || fail "must ship GNOME dark dconf defaults"
-grep -q 'JetBrainsMono Nerd Font' "$ROOT/install.sh" || fail "must set Console Nerd Font"
-grep -q 'install-chrome-flatpak.sh' "$ROOT/install.sh" || fail "must offer Chrome helper script"
-grep -q 'arch-chroot /mnt' "$ROOT/install.sh" || fail "recovery docs / hook must mention arch-chroot"
-grep -q 'Core extras' "$ROOT/install.sh" || fail "must split Core checklist"
-grep -q 'Dev / CLI tools' "$ROOT/install.sh" || fail "must split Dev/CLI checklist"
-grep -q 'Network / security' "$ROOT/install.sh" || fail "must split Network checklist"
-grep -q 'yn_on "\$DESKTOP"' "$ROOT/install.sh" || fail "TLP guard must use yn_on"
-grep -q 'pipefail' "$ROOT/install.sh" || fail "post-hook must use pipefail"
-grep -qE '\^https://' "$ROOT/install.sh" \
+grep -q 'answers_save' "$INSTALL_SH" || fail "must save T14S answers file"
+grep -q 'answers_load' "$INSTALL_SH" || fail "must load T14S_ANSWERS"
+grep -q 'T14S_NONINTERACTIVE' "$INSTALL_SH" || fail "must honor T14S_NONINTERACTIVE"
+grep -q 'Install profile' "$INSTALL_SH" || fail "must offer gnome/dev/minimal presets"
+grep -q 'smartctl -H' "$INSTALL_SH" || fail "must SMART-check target disk"
+grep -q 'INSTALL_CLI' "$INSTALL_SH" || fail "must offer CLI tools bundle"
+grep -q 'INSTALL_PODMAN' "$INSTALL_SH" || fail "must offer podman"
+grep -q 'INSTALL_DOCKER' "$INSTALL_SH" || fail "must offer docker"
+grep -q 'INSTALL_VIRT' "$INSTALL_SH" || fail "must offer libvirt/qemu"
+grep -q 'INSTALL_AVAHI' "$INSTALL_SH" || fail "must offer avahi"
+grep -q 'INSTALL_STARSHIP' "$INSTALL_SH" || fail "must offer starship"
+grep -q 'POST_HOOK_URL' "$INSTALL_SH" || fail "must offer post-install hook URL"
+grep -q 'prefer-dark' "$INSTALL_SH" || fail "must ship GNOME dark dconf defaults"
+grep -q 'JetBrainsMono Nerd Font' "$INSTALL_SH" || fail "must set Console Nerd Font"
+grep -q 'install-chrome-flatpak.sh' "$INSTALL_SH" || fail "must offer Chrome helper script"
+grep -q 'arch-chroot /mnt' "$INSTALL_SH" || fail "recovery docs / hook must mention arch-chroot"
+grep -q 'Core extras' "$INSTALL_SH" || fail "must split Core checklist"
+grep -q 'Dev / CLI tools' "$INSTALL_SH" || fail "must split Dev/CLI checklist"
+grep -q 'Network / security' "$INSTALL_SH" || fail "must split Network checklist"
+grep -q 'yn_on "\$DESKTOP"' "$INSTALL_SH" || fail "TLP guard must use yn_on"
+grep -q 'pipefail' "$INSTALL_SH" || fail "post-hook must use pipefail"
+grep -qE '\^https://' "$INSTALL_SH" \
   || fail "post-hook must require https:// URL (fail closed)"
-grep -q 'T14S_POST_HOOK_SHA256' "$ROOT/install.sh" \
+grep -q 'T14S_POST_HOOK_SHA256' "$INSTALL_SH" \
   || fail "post-hook must support optional T14S_POST_HOOK_SHA256 pin"
-grep -q 'T14S_POST_HOOK_I_UNDERSTAND' "$ROOT/install.sh" \
+grep -q 'T14S_POST_HOOK_I_UNDERSTAND' "$INSTALL_SH" \
   || fail "post-hook NONINTERACTIVE must require explicit opt-in"
-grep -q 'mdns_minimal' "$ROOT/install.sh" || fail "avahi path must patch nsswitch mdns_minimal"
-grep -q 'jail.d/sshd.local' "$ROOT/install.sh" || fail "fail2ban must enable sshd jail"
-grep -q 'using DISK from answers' "$ROOT/install.sh" \
+grep -q 'mdns_minimal' "$INSTALL_SH" || fail "avahi path must patch nsswitch mdns_minimal"
+grep -q 'jail.d/sshd.local' "$INSTALL_SH" || fail "fail2ban must enable sshd jail"
+grep -q 'using DISK from answers' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must honor DISK from answers"
-grep -q 'timezone from answers' "$ROOT/install.sh" \
+grep -q 'timezone from answers' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must honor TIMEZONE from answers"
-grep -q 'T14S_PASS_FILE' "$ROOT/install.sh" || fail "must support T14S_PASS_FILE"
-grep -q 'secrets_load' "$ROOT/install.sh" || fail "must define secrets_load"
-grep -q 'MANUAL partitions from answers' "$ROOT/install.sh" \
+grep -q 'T14S_PASS_FILE' "$INSTALL_SH" || fail "must support T14S_PASS_FILE"
+grep -q 'secrets_load' "$INSTALL_SH" || fail "must define secrets_load"
+grep -q 'MANUAL partitions from answers' "$INSTALL_SH" \
   || fail "NONINTERACTIVE MANUAL must honor EFI_PART/ROOT_PART"
-grep -q 'SKIP_THINKPAD_HW' "$ROOT/install.sh" || fail "must detect/skip ThinkPad HW on VM"
-grep -q 'INSTALL_SNAPPER_HOME' "$ROOT/install.sh" || fail "must offer snapper home"
-grep -q 'ESP free after UKI\|ESP nearly full after UKI' "$ROOT/install.sh" \
+grep -q 'SKIP_THINKPAD_HW' "$INSTALL_SH" || fail "must detect/skip ThinkPad HW on VM"
+grep -q 'INSTALL_SNAPPER_HOME' "$INSTALL_SH" || fail "must offer snapper home"
+grep -q 'ESP free after UKI\|ESP nearly full after UKI' "$INSTALL_SH" \
   || fail "must check ESP free space after UKI build"
-grep -q 'sbctl verify' "$ROOT/install.sh" || fail "must run sbctl verify"
-grep -q 'enroll skipped — sbctl verify failed' "$ROOT/install.sh" \
+grep -q 'sbctl verify' "$INSTALL_SH" || fail "must run sbctl verify"
+grep -q 'enroll skipped — sbctl verify failed' "$INSTALL_SH" \
   || fail "must block enroll when sbctl verify fails"
-grep -q 't14s-selftest' "$ROOT/install.sh" || fail "must offer BT/audio self-test"
-grep -q 'BTRFS_COMPRESS' "$ROOT/install.sh" || fail "must offer Btrfs compression radio"
-grep -q 'ZRAM_SIZE' "$ROOT/install.sh" || fail "must offer zram size radio"
-grep -q 'REFLECTOR_COUNTRY' "$ROOT/install.sh" || fail "must honor reflector country"
-grep -q 'T14S_DEFAULT_HOOK_URL' "$ROOT/install.sh" || fail "must offer hook env preset"
-grep -q 'xdg-user-dirs-update' "$ROOT/install.sh" || fail "must run xdg-user-dirs-update"
-grep -q 'INSTALL_LINUX_STABLE' "$ROOT/install.sh" || fail "must offer optional linux UKI"
-grep -q 'INSTALL_PLYMOUTH' "$ROOT/install.sh" || fail "must offer optional plymouth"
+grep -q 't14s-selftest' "$INSTALL_SH" || fail "must offer BT/audio self-test"
+grep -q 'BTRFS_COMPRESS' "$INSTALL_SH" || fail "must offer Btrfs compression radio"
+grep -q 'ZRAM_SIZE' "$INSTALL_SH" || fail "must offer zram size radio"
+grep -q 'REFLECTOR_COUNTRY' "$INSTALL_SH" || fail "must honor reflector country"
+grep -q 'T14S_DEFAULT_HOOK_URL' "$INSTALL_SH" || fail "must offer hook env preset"
+grep -q 'xdg-user-dirs-update' "$INSTALL_SH" || fail "must run xdg-user-dirs-update"
+grep -q 'INSTALL_LINUX_STABLE' "$INSTALL_SH" || fail "must offer optional linux UKI"
+grep -q 'INSTALL_PLYMOUTH' "$INSTALL_SH" || fail "must offer optional plymouth"
 grep -q 'Answers schema' "$ROOT/README.md" || fail "README must document answers schema"
-grep -q 'NONINTERACTIVE: skipping REVIEW/confirm' "$ROOT/install.sh" \
+grep -q 'NONINTERACTIVE: skipping REVIEW/confirm' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must skip REVIEW/final confirm"
-grep -q 'NONINTERACTIVE AUTO: will erase' "$ROOT/install.sh" \
+grep -q 'NONINTERACTIVE AUTO: will erase' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must skip AUTO type-DISK wipe confirm"
-grep -q 'NONINTERACTIVE requires T14S_PASS_FILE' "$ROOT/install.sh" \
+grep -q 'NONINTERACTIVE requires T14S_PASS_FILE' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must die early without T14S_PASS_FILE"
 # Pass-file gate must appear before ui_password for LUKS
-python3 - "$ROOT/install.sh" <<'PY' || fail "NONINTERACTIVE pass-file die must precede ui_password"
+python3 - "$INSTALL_SH" <<'PY' || fail "NONINTERACTIVE pass-file die must precede ui_password"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
@@ -693,22 +717,15 @@ pw_i = t.find("ui_password 'LUKS passphrase'")
 assert die_i > 0 and pw_i > 0 and die_i < pw_i, (die_i, pw_i)
 print("ok pass-file die order")
 PY
-grep -q 'part_on_disk' "$ROOT/install.sh" || fail "MANUAL answers must verify part_on_disk"
-grep -q 'yn_canon' "$ROOT/install.sh" || fail "must canonicalize flags to Y/N"
-grep -q 'chmod 600' "$ROOT/install.sh" || fail "answers_save / secrets must chmod 600"
-grep -q 'must be mode 0600' "$ROOT/install.sh" || fail "secrets_load must require mode 0600"
+grep -q 'part_on_disk' "$INSTALL_SH" || fail "MANUAL answers must verify part_on_disk"
+grep -q 'yn_canon' "$INSTALL_SH" || fail "must canonicalize flags to Y/N"
+grep -q 'chmod 600' "$INSTALL_SH" || fail "answers_save / secrets must chmod 600"
+grep -q 'must be mode 0600' "$INSTALL_SH" || fail "secrets_load must require mode 0600"
 # Chroot body must define yn_on and not leave stray ] after yn_on calls
-python3 - "$ROOT/install.sh" <<'PY' || fail "chroot yn_on gates broken"
+python3 - "$ROOT/lib/80-chroot-setup.sh" <<'PY' || fail "chroot yn_on gates broken"
 from pathlib import Path
 import re, sys, subprocess, tempfile
-t = Path(sys.argv[1]).read_text()
-start = t.find("<<'CHROOT'\\n")
-if start < 0:
-    start = t.find("<<'CHROOT'\n")
-assert start > 0
-start = t.find("\n", start) + 1
-end = t.find("\nCHROOT\n", start)
-body = t[start:end]
+body = Path(sys.argv[1]).read_text()
 assert "yn_on() {" in body, "chroot missing yn_on"
 assert not re.search(r'yn_on[^\n]*"\]', body), "stray ] after yn_on"
 assert not re.search(r'\$\{(?:INSTALL_|SKIP_|DESKTOP|ENROLL_|ENABLE_|UFW_)[A-Z0-9_]*\^\^\}', body), \
@@ -720,27 +737,27 @@ with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
 subprocess.check_call(["bash", "-n", name])
 print("ok chroot yn_on + bash -n")
 PY
-grep -q 'xdg-user-dirs' "$ROOT/install.sh" || fail "must pacstrap or call xdg-user-dirs"
-grep -q 'T14S_I_WILL_ERASE' "$ROOT/install.sh" \
+grep -q 'xdg-user-dirs' "$INSTALL_SH" || fail "must pacstrap or call xdg-user-dirs"
+grep -q 'T14S_I_WILL_ERASE' "$INSTALL_SH" \
   || fail "NONINTERACTIVE wipe must require T14S_I_WILL_ERASE"
-grep -q 'no env passwords' "$ROOT/install.sh" \
+grep -q 'no env passwords' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must refuse ambient env passwords"
-grep -q 'unset -v LUKS_PASS USER_PASS ROOT_PASS' "$ROOT/install.sh" \
+grep -q 'unset -v LUKS_PASS USER_PASS ROOT_PASS' "$INSTALL_SH" \
   || fail "must unset ambient password env at start"
-grep -q 'cannot read mode of T14S_PASS_FILE' "$ROOT/install.sh" \
+grep -q 'cannot read mode of T14S_PASS_FILE' "$INSTALL_SH" \
   || fail "secrets_load must fail closed if mode unknown"
-grep -q 'EXTRA_PKGS_LIST' "$ROOT/install.sh" \
+grep -q 'EXTRA_PKGS_LIST' "$INSTALL_SH" \
   || fail "must persist EXTRA_PKGS_LIST in answers"
-grep -q "v == y || \$v == yes" "$ROOT/install.sh" \
+grep -q "v == y || \$v == yes" "$INSTALL_SH" \
   || fail "yn_on must match y/yes/on/1 only"
-grep -q "HOOKS=.*sd-encrypt" "$ROOT/install.sh" \
+grep -q "HOOKS=.*sd-encrypt" "$INSTALL_SH" \
   || fail "HOOKS verify must match ^HOOKS=.*sd-encrypt"
-grep -q 'NONINTERACTIVE needs DISK=' "$ROOT/install.sh" \
+grep -q 'NONINTERACTIVE needs DISK=' "$INSTALL_SH" \
   || fail "NONINTERACTIVE missing DISK must die (not TUI)"
-grep -q 'NONINTERACTIVE needs MODE=' "$ROOT/install.sh" \
+grep -q 'NONINTERACTIVE needs MODE=' "$INSTALL_SH" \
   || fail "NONINTERACTIVE missing MODE must die"
 # part_on_disk must not accept nvme0n1 vs nvme0n10 via naive prefix
-python3 - "$ROOT/install.sh" <<'PY' || fail "part_on_disk must bound nvme prefix"
+python3 - "$INSTALL_SH" <<'PY' || fail "part_on_disk must bound nvme prefix"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
@@ -755,11 +772,11 @@ grep -q 'T14S_I_WILL_ERASE' "$ROOT/README.md" \
   || fail "README must document T14S_I_WILL_ERASE"
 grep -q 'EXTRA_PKGS_LIST' "$ROOT/README.md" \
   || fail "README must document EXTRA_PKGS_LIST"
-grep -q 'CLEAN_ESP_ARCH' "$ROOT/install.sh" || fail "must offer CLEAN_ESP_ARCH"
-grep -q 'clean_esp_arch_files' "$ROOT/install.sh" || fail "must define clean_esp_arch_files"
-grep -q 'clean_esp "' "$ROOT/install.sh" || fail "Core checklist must offer clean_esp"
-grep -q 'EFI/arch' "$ROOT/install.sh" || fail "ESP clean must remove EFI/arch vendor dir"
-grep -A25 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'CLEAN_ESP_ARCH=' \
+grep -q 'CLEAN_ESP_ARCH' "$INSTALL_SH" || fail "must offer CLEAN_ESP_ARCH"
+grep -q 'clean_esp_arch_files' "$INSTALL_SH" || fail "must define clean_esp_arch_files"
+grep -q 'clean_esp "' "$INSTALL_SH" || fail "Core checklist must offer clean_esp"
+grep -q 'EFI/arch' "$INSTALL_SH" || fail "ESP clean must remove EFI/arch vendor dir"
+grep -A25 'arch-chroot /mnt env' "$INSTALL_SH" | grep -q 'CLEAN_ESP_ARCH=' \
   || fail "arch-chroot env must pass CLEAN_ESP_ARCH"
 grep -q 'CLEAN_ESP_ARCH' "$ROOT/README.md" || fail "README must document CLEAN_ESP_ARCH"
 grep -q 'ESP / EFI layout' "$ROOT/README.md" || fail "README must document ESP/EFI layout"
@@ -768,7 +785,7 @@ grep -q 'Can everything live under one directory' "$ROOT/README.md" \
   || fail "README must document why EFI is not one directory"
 grep -q 'sbctl verify' "$ROOT/README.md" || fail "README must mention sbctl verify"
 # NONINTERACTIVE must keep EXTRA_PKGS_LIST replay (not wipe array empty)
-python3 - "$ROOT/install.sh" <<'PY' || fail "NONINTERACTIVE must not wipe EXTRA_PKGS after answers replay"
+python3 - "$INSTALL_SH" <<'PY' || fail "NONINTERACTIVE must not wipe EXTRA_PKGS after answers replay"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
@@ -779,7 +796,7 @@ assert "EXTRA_PKGS=()" not in window, "NI still wipes EXTRA_PKGS"
 print("ok EXTRA_PKGS_LIST replay")
 PY
 # Interactive checklist must re-apply _extras_keep after EXTRA_PKGS=()
-python3 - "$ROOT/install.sh" <<'PY' || fail "interactive must restore EXTRA_PKGS_LIST after checklist"
+python3 - "$INSTALL_SH" <<'PY' || fail "interactive must restore EXTRA_PKGS_LIST after checklist"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
@@ -788,7 +805,7 @@ assert "EXTRA_PKGS+=(\"${_extras_keep[@]}\")" in t or 'EXTRA_PKGS+=("${_extras_k
 print("ok interactive extras keep")
 PY
 # Loader cleanup must use arch*.conf only (not linux-*.conf)
-python3 - "$ROOT/install.sh" <<'PY' || fail "ESP clean must not delete linux-*.conf"
+python3 - "$INSTALL_SH" <<'PY' || fail "ESP clean must not delete linux-*.conf"
 from pathlib import Path
 import sys, re
 t = Path(sys.argv[1]).read_text()
@@ -797,33 +814,33 @@ assert "-name 'arch*.conf'" in t or '-name "arch*.conf"' in t
 assert not re.search(r"-name 'linux-\*\.conf'", t), "linux-*.conf still deleted"
 print("ok arch*.conf only")
 PY
-grep -q '_env_on' "$ROOT/install.sh" || fail "must parse T14S_NONINTERACTIVE / I_WILL_ERASE with yn-style"
-grep -q 'DNS labels only' "$ROOT/install.sh" || fail "must validate HOSTNAME charset"
-grep -q 'yn_on "\$DESKTOP"' "$ROOT/install.sh" || fail "finish path must use yn_on DESKTOP"
-grep -q 'flatpak install --user -y flathub com.google.Chrome' "$ROOT/install.sh" \
+grep -q '_env_on' "$INSTALL_SH" || fail "must parse T14S_NONINTERACTIVE / I_WILL_ERASE with yn-style"
+grep -q 'DNS labels only' "$INSTALL_SH" || fail "must validate HOSTNAME charset"
+grep -q 'yn_on "\$DESKTOP"' "$INSTALL_SH" || fail "finish path must use yn_on DESKTOP"
+grep -q 'flatpak install --user -y flathub com.google.Chrome' "$INSTALL_SH" \
   || fail "finish Chrome hint must use --user"
 grep -q 'flatpak install --user' "$ROOT/README.md" \
   || fail "README Chrome tip must match helper (--user)"
 grep -q 'Setup Mode' "$ROOT/README.md" || fail "README SB enroll must mention Setup Mode"
 grep -q 'FORMAT_EFI=1' "$ROOT/README.md" || fail "README must note CLEAN_ESP ignored when formatting"
-grep -q 'dead entries' "$ROOT/install.sh" || fail "CLEAN_ESP_ARCH=N must warn about dead boot entries"
+grep -q 'dead entries' "$INSTALL_SH" || fail "CLEAN_ESP_ARCH=N must warn about dead boot entries"
 # umask must not leak into arch-chroot (regression: /etc/locale.conf 0600 → LANG unset).
-awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1} f&&/^CHROOT$/{f=0;next} !f' "$ROOT/install.sh" \
-  | grep -qE '^umask ' && fail "script-wide umask leaks into arch-chroot; scope it in a subshell" || true
-awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1;n=0} f{n++} f&&n<=6' "$ROOT/install.sh" \
-  | grep -qx 'umask 022' || fail "chroot script must pin umask 022"
-grep -q 'fmask=0077' "$ROOT/install.sh" || fail "ESP fstab must use fmask/dmask=0077 (random-seed)"
+grep -vE '^\s*#' "$ROOT/install.sh" | grep -qE '^umask ' \
+  && fail "script-wide umask leaks into arch-chroot; scope it in a subshell" || true
+grep -qx 'umask 022' "$ROOT/lib/80-chroot-setup.sh" \
+  || fail "chroot script must pin umask 022"
+grep -q 'fmask=0077' "$INSTALL_SH" || fail "ESP fstab must use fmask/dmask=0077 (random-seed)"
 # Chroot must not delete pacstrap's kernels/ucode before mkinitcpio -P
 # (regression: "'/boot/vmlinuz-linux-lts' must be readable").
-awk '/^cat > \/mnt\/root\/chroot-setup.sh/{f=1} f&&/^mkinitcpio -P/{exit} f' "$ROOT/install.sh" \
+awk '/^mkinitcpio -P/{exit} {print}' "$ROOT/lib/80-chroot-setup.sh" \
   | grep -vE '^\s*#' \
   | grep -qE 'rm .*(/boot/vmlinuz|/boot/(amd|intel)-ucode\.img)' \
   && fail "chroot removes /boot/vmlinuz* or *-ucode.img before mkinitcpio -P" || true
-grep -q 'sudo -u "\$USERNAME" tee -a' "$ROOT/install.sh" \
+grep -q 'sudo -u "\$USERNAME" tee -a' "$INSTALL_SH" \
   || fail "starship must append zshrc as the user"
-! grep -q "gtk-theme='Adwaita-dark'" "$ROOT/install.sh" \
+! grep -q "gtk-theme='Adwaita-dark'" "$INSTALL_SH" \
   || fail "dconf must not set stale Adwaita-dark gtk-theme"
-python3 - "$ROOT/install.sh" <<'PY' || fail "JetBrainsMono dconf must be gated on INSTALL_NERD_FONTS"
+python3 - "$INSTALL_SH" <<'PY' || fail "JetBrainsMono dconf must be gated on INSTALL_NERD_FONTS"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
@@ -833,20 +850,20 @@ window = t[max(0, i - 400):i]
 assert "INSTALL_NERD_FONTS" in window, "JetBrainsMono dconf not under INSTALL_NERD_FONTS gate"
 print("ok nerd dconf gate")
 PY
-grep -q 'yn_on "\$INSTALL_CHROME_HINT"' "$ROOT/install.sh" \
+grep -q 'yn_on "\$INSTALL_CHROME_HINT"' "$INSTALL_SH" \
   || fail "chrome hint must use yn_on"
-grep -q 'set-x11-keymap' "$ROOT/install.sh" || fail "GNOME path must set X11 keymap from console map"
-grep -q 'XKB_LAYOUT=gb' "$ROOT/install.sh" || fail "XKB remap must map uk → gb"
-grep -q 'XkbVariant' "$ROOT/install.sh" || fail "XKB conf must support variants (dvorak/colemak/abnt2)"
-grep -q 'write_xkb_conf\|00-keyboard.conf' "$ROOT/install.sh" \
+grep -q 'set-x11-keymap' "$INSTALL_SH" || fail "GNOME path must set X11 keymap from console map"
+grep -q 'XKB_LAYOUT=gb' "$INSTALL_SH" || fail "XKB remap must map uk → gb"
+grep -q 'XkbVariant' "$INSTALL_SH" || fail "XKB conf must support variants (dvorak/colemak/abnt2)"
+grep -q 'write_xkb_conf\|00-keyboard.conf' "$INSTALL_SH" \
   || fail "must write 00-keyboard.conf when localectl fails"
-grep -A6 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'INSTALL_CUPS=' \
+grep -A6 'arch-chroot /mnt env' "$INSTALL_SH" | grep -q 'INSTALL_CUPS=' \
   || fail "arch-chroot env must pass INSTALL_CUPS"
-grep -A6 'arch-chroot /mnt env' "$ROOT/install.sh" | grep -q 'PACMAN_PARALLEL=' \
+grep -A6 'arch-chroot /mnt env' "$INSTALL_SH" | grep -q 'PACMAN_PARALLEL=' \
   || fail "arch-chroot env must pass PACMAN_PARALLEL"
-grep -q 'bash-completion' "$ROOT/install.sh" || fail "must offer archdi console tools"
-grep -q 'T14S_EXTRA_PKGS' "$ROOT/install.sh" || fail "must honor T14S_EXTRA_PKGS / free-form extras"
-grep -q 'locale=%s' "$ROOT/install.sh" || fail "DRYRUN dump must include locale"
+grep -q 'bash-completion' "$INSTALL_SH" || fail "must offer archdi console tools"
+grep -q 'T14S_EXTRA_PKGS' "$INSTALL_SH" || fail "must honor T14S_EXTRA_PKGS / free-form extras"
+grep -q 'locale=%s' "$INSTALL_SH" || fail "DRYRUN dump must include locale"
 grep -q 'archfi' "$ROOT/README.md" || fail "README must credit archfi adaptations"
 grep -q 'archdi' "$ROOT/README.md" || fail "README must credit archdi adaptations"
 # keymap basename strip unit (no dialog)
@@ -867,41 +884,44 @@ for src, want in samples.items():
 print("ok keymap strip")
 PY
 # Prefer dialog over whiptail for progressbox
-grep -q 'Prefer dialog' "$ROOT/install.sh" \
-  || grep -A2 'command -v dialog' "$ROOT/install.sh" | grep -q 'UI=dialog' \
+grep -q 'Prefer dialog' "$INSTALL_SH" \
+  || grep -A2 'command -v dialog' "$INSTALL_SH" | grep -q 'UI=dialog' \
   || fail "bootstrap must prefer dialog when available"
 # Leftover cleanup: only after the final confirm + DRYRUN exit, only on the target.
-python3 - "$ROOT/install.sh" <<'PY' || fail "leftover cleanup must run after confirmation and be target-scoped"
+python3 - "$INSTALL_SH" <<'PY' || fail "leftover cleanup must run after confirmation and be target-scoped"
 from pathlib import Path
 import sys
 t = Path(sys.argv[1]).read_text()
 confirm = t.find('"Start the installation? The partitions above will be ERASED."')
 dry_exit = t.find("exit 0", t.find("if (( DRYRUN )); then\n  printf 'DRYRUN:"))
-umount = t.find("umount -R /mnt")
+release = t.find("release_target_devices", dry_exit)
 part = t.find('sgdisk --zap-all "$DISK"')
-assert 0 < confirm < dry_exit < umount < part, (confirm, dry_exit, umount, part)
+assert 0 < confirm < dry_exit < release < part, (confirm, dry_exit, release, part)
 assert "swapoff -a" not in t, "global swapoff -a must not be used"
-window = t[t.rfind("if mountpoint -q /mnt", 0, umount):umount]
-assert '_on_target "$_src" || die' in window, "umount /mnt must be gated on the target"
-assert 'if _on_target "$_sw"; then swapoff "$_sw"' in t, "swapoff must be per-device on the target"
-assert "_on_target /dev/mapper/cryptroot" in t, "cryptroot close must be gated on the target"
+# Body lives in lib/40-disk.sh (concatenated into INSTALL_SH for greps).
+fn = t.find("release_target_devices() {")
+assert fn > 0, "release_target_devices must be defined"
+body = t[fn:t.find("\n}", fn) + 2]
+assert '_on_target "$_src" || die' in body, "umount /mnt must be gated on the target"
+assert 'if _on_target "$_sw"; then swapoff "$_sw"' in body, "swapoff must be per-device on the target"
+assert "_on_target /dev/mapper/cryptroot" in body, "cryptroot close must be gated on the target"
 print("ok scoped leftover cleanup")
 PY
 
 # partitioning: partitions chosen from lists, sizes validated
-grep -q 'build_part_menu' "$ROOT/install.sh" || fail "partition selector helper missing"
-grep -q 'pick_part' "$ROOT/install.sh" || fail "partition picker missing"
-grep -q 'EFI system partition size' "$ROOT/install.sh" || fail "ESP size must be selectable"
-grep -q 'lsblk -prno TYPE,PATH' "$ROOT/install.sh" || fail "partition list must filter to type=part"
-grep -q 'root_mb < 8192' "$ROOT/install.sh" || fail "must warn on tiny root"
+grep -q 'build_part_menu' "$INSTALL_SH" || fail "partition selector helper missing"
+grep -q 'pick_part' "$INSTALL_SH" || fail "partition picker missing"
+grep -q 'EFI system partition size' "$INSTALL_SH" || fail "ESP size must be selectable"
+grep -q 'lsblk -prno TYPE,PATH' "$INSTALL_SH" || fail "partition list must filter to type=part"
+grep -q 'root_mb < 8192' "$INSTALL_SH" || fail "must warn on tiny root"
 
-grep -q 'HelllGuest/t14s-arch-install/main/install.sh' "$ROOT/install.sh" \
+grep -q 'HelllGuest/t14s-arch-install/main/install.sh' "$INSTALL_SH" \
   || fail "curl URL must point at this repo"
-! grep -q 'github.com/HelllGuest/dotfiles' "$ROOT/install.sh" \
+! grep -q 'github.com/HelllGuest/dotfiles' "$INSTALL_SH" \
   || fail "install.sh must not link private dotfiles"
 ! grep -q 'github.com/HelllGuest/dotfiles' "$ROOT/README.md" \
   || fail "README must not link private dotfiles"
-grep -E 'Flatpak/Podman|Podman userns' "$ROOT/install.sh" \
+grep -E 'Flatpak/Podman|Podman userns' "$INSTALL_SH" \
   && fail "banner must not claim Podman" || true
 
 # Identity validators: real inputs (extract from install.sh; fixtures for CI)
@@ -909,7 +929,7 @@ extract_fn() {
   awk -v n="$1" '
     $0 ~ "^" n "\\(\\)" {grab=1}
     grab {print; if ($0 == "}") exit}
-  ' "$ROOT/install.sh"
+  ' "$INSTALL_SH"
 }
 # shellcheck disable=SC1090
 source <(for fn in valid_hostname valid_username valid_timezone valid_locale valid_keymap; do
@@ -985,7 +1005,7 @@ env T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_idtmp/keymaps" \
 ' "$_idtmp/valid_keymap.sh" \
   || fail "stub localectl: us/dvo/extra pass / u. and ... must fail"
 
-command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning -e SC2015,SC2086,SC2162 "$ROOT/install.sh" \
+command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning -e SC2015,SC2086,SC2162 "$INSTALL_SH" \
   || echo "NOTE: shellcheck skipped or warnings-only"
 
 # Live NONINTERACTIVE dry-run: catches set -e helper return bugs (no disk writes).
@@ -1038,7 +1058,8 @@ EOF
   if ! T14S_DRYRUN=1 T14S_UI=plain T14S_NONINTERACTIVE=1 T14S_I_WILL_ERASE=1 \
       T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_drytmp/keymaps" \
       T14S_ANSWERS="$_ans" T14S_PASS_FILE="$_pass" T14S_ANSWERS_OUT="$_out" \
-      bash "$ROOT/install.sh" >"$_dry_log" 2>&1
+      T14S_LIB_DIR="$ROOT/lib" \
+      bash "$ORCH_SH" >"$_dry_log" 2>&1
   then
     tail -n 40 "$_dry_log" >&2 || true
     fail "NONINTERACTIVE dry-run exited non-zero (disk=$_dry_disk)"
@@ -1058,7 +1079,7 @@ EOF
 fi
 # Static: DRYRUN exit must precede every destructive write (log grep is useless:
 # those commands are not echoed, and start_log runs only after the exit).
-python3 - "$ROOT/install.sh" <<'PY' || fail "DRYRUN exit must precede destructive commands"
+python3 - "$INSTALL_SH" <<'PY' || fail "DRYRUN exit must precede destructive commands"
 from pathlib import Path
 import re, sys
 t = Path(sys.argv[1]).read_text().splitlines()
@@ -1102,14 +1123,14 @@ print('ok DRYRUN exit before destructive phase')
 PY
 
 # ── safety / robustness regressions ─────────────────────────
-_pick="$(awk '/^pick_part\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
+_pick="$(awk '/^pick_part\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$INSTALL_SH")"
 grep -q 'part_on_disk "\$ans" "\$disk"' <<<"$_pick" \
   || fail "pick_part must reject manual partitions on another disk"
-grep -qF '[[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]]' "$ROOT/install.sh" \
+grep -qF '[[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]]' "$INSTALL_SH" \
   || fail "preflight must require /run/archiso unless T14S_ALLOW_NON_ISO=1"
-grep -q 'iflag=count_bytes count="\$size"' "$ROOT/install.sh" \
+grep -q 'iflag=count_bytes count="\$size"' "$INSTALL_SH" \
   || fail "LUKS wipe must bound dd to the device size"
-grep -q '(( rc == 0 )) || die "LUKS wipe failed' "$ROOT/install.sh" \
+grep -q '(( rc == 0 )) || die "LUKS wipe failed' "$INSTALL_SH" \
   || fail "LUKS wipe must only accept dd exit 0"
 _tmp="$(mktemp -d)"
 dd if=/dev/zero of="$_tmp/w" bs=64M iflag=count_bytes count=1000000 status=none \
@@ -1120,17 +1141,17 @@ touch "$_tmp/install.sh"
 ( cd "$_tmp" && read -r -a _a <<<'htop * tmux' && [[ ${_a[*]} == 'htop * tmux' ]] ) \
   || fail "package tokenizing must not pathname-expand"
 rm -rf "$_tmp"
-! grep -qE 'for _p in \$\{?(EXTRA_PKGS_LIST|_extra_in)' "$ROOT/install.sh" \
+! grep -qE 'for _p in \$\{?(EXTRA_PKGS_LIST|_extra_in)' "$INSTALL_SH" \
   || fail "package lists must not use unquoted for-in splitting"
-[[ $(grep -cE 'read -r -a _pkgs <<<"\$(EXTRA_PKGS_LIST|_extra_in)"' "$ROOT/install.sh") -eq 2 ]] \
+[[ $(grep -cE 'read -r -a _pkgs <<<"\$(EXTRA_PKGS_LIST|_extra_in)"' "$INSTALL_SH") -eq 2 ]] \
   || fail "both package lists must tokenize with read -r -a"
-! grep -qF "val=\${val#\$'\\r'}" "$ROOT/install.sh" \
+! grep -qF "val=\${val#\$'\\r'}" "$INSTALL_SH" \
   || fail "answers/secrets parsers must strip trailing CR, not leading"
-[[ $(grep -cF "val=\${val%\$'\\r'}" "$ROOT/install.sh") -eq 2 ]] \
+[[ $(grep -cF "val=\${val%\$'\\r'}" "$INSTALL_SH") -eq 2 ]] \
   || fail "both answers and secrets parsers must strip trailing CR"
-grep -q 'plain | dialog | whiptail) UI=\$T14S_UI' "$ROOT/install.sh" \
+grep -q 'plain | dialog | whiptail) UI=\$T14S_UI' "$INSTALL_SH" \
   || fail "T14S_UI must be limited to plain|dialog|whiptail"
-grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$ROOT/install.sh" \
+grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$INSTALL_SH" \
   || fail "ERR trap must report the failed command"
 
 # T14S_DRYRUN: unknown values abort (never a silent real install) and are
@@ -1138,7 +1159,8 @@ grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$ROO
 _tmp="$(mktemp -d)"
 for _v in true 'maybe' "a[\$(touch $_tmp/pwned)]"; do
   _rc=0
-  T14S_DRYRUN="$_v" T14S_NONINTERACTIVE=1 timeout 30 bash "$ROOT/install.sh" </dev/null >/dev/null 2>&1 || _rc=$?
+  T14S_DRYRUN="$_v" T14S_NONINTERACTIVE=1 T14S_LIB_DIR="$ROOT/lib" \
+    timeout 30 bash "$ORCH_SH" </dev/null >/dev/null 2>&1 || _rc=$?
   [[ -e $_tmp/pwned ]] && fail "T14S_DRYRUN value was executed: $_v"
   if [[ $_v == true ]]; then
     (( _rc != 2 )) || fail "T14S_DRYRUN=true must be accepted as dry run"
@@ -1150,7 +1172,7 @@ done
 # answers_save: atomic rename, mode 0600, replaces a symlink instead of following it.
 printf 'victim\n' >"$_tmp/victim"
 ln -s "$_tmp/victim" "$_tmp/answers.env"
-_fn="$(awk '/^answers_save\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
+_fn="$(awk '/^answers_save\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$INSTALL_SH")"
 [[ -n $_fn ]] || fail "could not extract answers_save"
 bash -c '
   set -euo pipefail
@@ -1167,7 +1189,7 @@ grep -qx 'HOSTNAME=t14s' "$_tmp/answers.env" || fail "answers file content missi
 rm -rf "$_tmp"
 
 # _on_target: only the confirmed target (or, in auto mode, partitions on DISK).
-_fn="$(awk '/^_on_target\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/install.sh")"
+_fn="$(awk '/^_on_target\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$INSTALL_SH")"
 [[ -n $_fn ]] || fail "could not extract _on_target"
 bash -c '
   set -euo pipefail
@@ -1189,18 +1211,18 @@ bash -c '
 ' _ "$_fn" || fail "_on_target ownership check wrong (exit $?)"
 
 # Reused ESP: back up loader.conf and the fallback loader, and say so up front.
-grep -q 'for _bk in /boot/EFI/BOOT/BOOTX64.EFI /boot/loader/loader.conf; do' "$ROOT/install.sh" \
+grep -q 'for _bk in /boot/EFI/BOOT/BOOTX64.EFI /boot/loader/loader.conf; do' "$INSTALL_SH" \
   || fail "reused ESP must back up BOOTX64.EFI and loader.conf"
-! grep -q 'BOOTX64.EFI.pre-arch.bak 2>/dev/null || true' "$ROOT/install.sh" \
+! grep -q 'BOOTX64.EFI.pre-arch.bak 2>/dev/null || true' "$INSTALL_SH" \
   || fail "ESP backup failure must be reported, not swallowed"
-grep -q 'firmware fallback loader) is replaced' "$ROOT/install.sh" \
+grep -q 'firmware fallback loader) is replaced' "$INSTALL_SH" \
   || fail "ESP reuse prompt must warn that BOOTX64.EFI and loader.conf change"
 
 # NONINTERACTIVE must never block on a keypress or msgbox (VM test: the final
 # "INSTALL COMPLETE" waited for [enter] forever with the target unmounted).
 _fns=""
 for _f in ui_fold ui_msg die start_log stop_log; do
-  _body="$(awk -v f="$_f" '$0 ~ "^"f"\\(\\) *\\{" {p=1} p{print} p&&/^}/{exit}' "$ROOT/install.sh")"
+  _body="$(awk -v f="$_f" '$0 ~ "^"f"\\(\\) *\\{" {p=1} p{print} p&&/^}/{exit}' "$INSTALL_SH")"
   [[ -n $_body ]] || fail "could not extract $_f"
   _fns+="$_body"$'\n'
 done
@@ -1230,7 +1252,7 @@ rm -rf "$_tmp"
 unset -f _ui
 
 # t14s-selftest runs as the user (pipewire check): `ufw status` needs root.
-_st="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<.ST.$/{f=1;next} f&&/^ST$/{exit} f' "$ROOT/install.sh")"
+_st="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<.ST.$/{f=1;next} f&&/^ST$/{exit} f' "$INSTALL_SH")"
 [[ -n $_st ]] || fail "could not extract t14s-selftest"
 ! grep -v '^[[:space:]]*#' <<<"$_st" | grep -q 'ufw status' \
   || fail "selftest must not call root-only 'ufw status'"
