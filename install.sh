@@ -2191,6 +2191,12 @@ else
 fi
 unset -v _REVIEW _l
 
+# Validate optional post-hook URL before wipe / DRYRUN exit.
+if [[ -n ${POST_HOOK_URL:-} ]]; then
+  [[ $POST_HOOK_URL =~ ^https://[^[:space:]@]+$ ]] \
+    || die "POST_HOOK_URL must be https://… with no userinfo or spaces (got: $POST_HOOK_URL)"
+fi
+
 ANSWERS_OUT="${T14S_ANSWERS_OUT:-/tmp/t14s-answers.env}"
 answers_save "$ANSWERS_OUT" || warn "could not write answers to $ANSWERS_OUT"
 ok "answers saved: $ANSWERS_OUT (reload: T14S_ANSWERS=$ANSWERS_OUT)"
@@ -2513,15 +2519,15 @@ EOF
 systemctl enable paccache.timer
 
 stage 4 6 "users and passwords"
-# users — secrets from /root/.t14s-install-secrets (0600; shredded after chroot)
+# users — secrets from /root/.install-secrets (0600; shredded after chroot)
 # shellcheck disable=SC1091
-source /root/.t14s-install-secrets
+source /root/.install-secrets
 echo "root:${ROOT_PASS}" | chpasswd
 id "$USERNAME" &>/dev/null || useradd -m -G wheel -s /bin/zsh "$USERNAME"
 echo "${USERNAME}:${USER_PASS}" | chpasswd
 sed -i 's/^# %wheel ALL=(ALL:ALL) ALL/%wheel ALL=(ALL:ALL) ALL/' /etc/sudoers
 unset -v USER_PASS ROOT_PASS
-rm -f /root/.t14s-install-secrets
+rm -f /root/.install-secrets
 stage 6 8 "initramfs and kernel cmdline"
 # initramfs (systemd + sd-encrypt for LUKS; optional plymouth)
 _HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)'
@@ -3393,9 +3399,9 @@ CHROOT
     printf 'USERNAME=%q\n' "$USERNAME"
     printf 'USER_PASS=%q\n' "$USER_PASS"
     printf 'ROOT_PASS=%q\n' "$ROOT_PASS"
-  } > /mnt/root/.t14s-install-secrets
+  } > /mnt/root/.install-secrets
 )
-chmod 600 /mnt/root/.t14s-install-secrets
+chmod 600 /mnt/root/.install-secrets
 unset -v USER_PASS ROOT_PASS
 
 chmod +x /mnt/root/chroot-setup.sh
@@ -3403,8 +3409,8 @@ chmod +x /mnt/root/chroot-setup.sh
 declare -f pacman_tune >/mnt/root/t14s-lib.sh
 rm -f /mnt/root/t14s-warnings.txt
 cleanup_chroot_secrets() {
-  shred -u /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets 2>/dev/null \
-    || rm -f /mnt/root/chroot-setup.sh /mnt/root/.t14s-install-secrets
+  shred -u /mnt/root/chroot-setup.sh /mnt/root/.install-secrets 2>/dev/null \
+    || rm -f /mnt/root/chroot-setup.sh /mnt/root/.install-secrets
   rm -f /mnt/root/t14s-lib.sh
 }
 # Always drop secrets file even if chroot fails (set -e would otherwise skip shred).
@@ -3474,6 +3480,9 @@ fi
 answers_save /mnt/root/t14s-answers.env || true
 if [[ -n ${POST_HOOK_URL:-} ]]; then
   # Remote script runs as root in the new system — require explicit consent.
+  # Fail closed on scheme before consent / download (curl --proto is a backstop).
+  [[ $POST_HOOK_URL =~ ^https://[^[:space:]@]+$ ]] \
+    || die "POST_HOOK_URL must be https://… with no userinfo or spaces (got: $POST_HOOK_URL)"
   _hook_ok=0
   if (( NONINTERACTIVE )); then
     if [[ ${T14S_POST_HOOK_I_UNDERSTAND:-0} == 1 ]]; then
@@ -3494,9 +3503,20 @@ This downloads and executes remote code. Continue only if you trust the URL." no
   fi
   if (( _hook_ok )); then
     step "post-install hook: $POST_HOOK_URL"
+    # Download to a temp file (optional SHA-256), then feed arch-chroot — never
+    # pipe curl straight into bash when a pin is set or verification is wanted.
     if run_progress "post-install hook" \
-         env HOOK_URL="$POST_HOOK_URL" \
-         bash -c 'set -o pipefail; curl -fsSL --proto "=https" --tlsv1.2 --max-time 120 "$HOOK_URL" | arch-chroot /mnt bash -s'
+         env POST_HOOK_URL="$POST_HOOK_URL" T14S_POST_HOOK_SHA256="${T14S_POST_HOOK_SHA256:-}" \
+         bash -c 'set -euo pipefail
+           tmp=$(mktemp)
+           trap "rm -f -- \"$tmp\"" EXIT
+           curl -fsSL --proto "=https" --tlsv1.2 --max-time 120 -o "$tmp" "$POST_HOOK_URL"
+           if [[ -n ${T14S_POST_HOOK_SHA256:-} ]]; then
+             got=$(sha256sum "$tmp" | awk "{print \$1}")
+             [[ $got == "$T14S_POST_HOOK_SHA256" ]] \
+               || { echo "post-hook SHA-256 mismatch (got $got want $T14S_POST_HOOK_SHA256)" >&2; exit 1; }
+           fi
+           arch-chroot /mnt bash -s <"$tmp"'
     then
       ok "post-install hook finished"
     else

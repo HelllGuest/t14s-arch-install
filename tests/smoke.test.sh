@@ -26,7 +26,7 @@ grep -q '^valid_keymap()' "$ROOT/install.sh" || fail "must define valid_keymap"
 grep -q 'grep -qxF --' "$ROOT/install.sh" || fail "keymap match must be fixed-string (-F)"
 grep -q 'getent group' "$ROOT/install.sh" || fail "username must reject existing groups"
 grep -q 'TZif' "$ROOT/install.sh" || fail "timezone must require TZif magic"
-grep -q '.t14s-install-secrets' "$ROOT/install.sh" || fail "must use secrets file (not env passwords)"
+grep -q '.install-secrets' "$ROOT/install.sh" || fail "must use secrets file (not env passwords)"
 grep -q 'USER_PASS=' "$ROOT/install.sh" && grep -q 'arch-chroot /mnt env' "$ROOT/install.sh" \
   && grep 'arch-chroot /mnt env' -A3 "$ROOT/install.sh" | grep -q 'USER_PASS=' \
   && fail "must not pass USER_PASS via arch-chroot env" || true
@@ -630,7 +630,11 @@ grep -q 'Core extras' "$ROOT/install.sh" || fail "must split Core checklist"
 grep -q 'Dev / CLI tools' "$ROOT/install.sh" || fail "must split Dev/CLI checklist"
 grep -q 'Network / security' "$ROOT/install.sh" || fail "must split Network checklist"
 grep -q 'yn_on "\$DESKTOP"' "$ROOT/install.sh" || fail "TLP guard must use yn_on"
-grep -q 'set -o pipefail' "$ROOT/install.sh" || fail "post-hook must use pipefail"
+grep -q 'pipefail' "$ROOT/install.sh" || fail "post-hook must use pipefail"
+grep -qE '\^https://' "$ROOT/install.sh" \
+  || fail "post-hook must require https:// URL (fail closed)"
+grep -q 'T14S_POST_HOOK_SHA256' "$ROOT/install.sh" \
+  || fail "post-hook must support optional T14S_POST_HOOK_SHA256 pin"
 grep -q 'T14S_POST_HOOK_I_UNDERSTAND' "$ROOT/install.sh" \
   || fail "post-hook NONINTERACTIVE must require explicit opt-in"
 grep -q 'mdns_minimal' "$ROOT/install.sh" || fail "avahi path must patch nsswitch mdns_minimal"

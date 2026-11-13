@@ -149,7 +149,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | AUTO: entire disk GPT rewrite | Single-disk dedicated install |
 | Non-UKI `initramfs-*.img` after UKI build | Free ESP space |
 | Stale Arch UKIs / `arch*.conf` / `EFI/arch` (when `CLEAN_ESP_ARCH=Y`) | Avoid dual Arch boots; free ESP |
-| `/root/.t14s-install-secrets` + chroot script shredded | Passwords not left on disk |
+| `/root/.install-secrets` + chroot script shredded | Passwords not left on disk |
 | Chrome Flatpak **not** installed in chroot | bwrap userns fails in chroot |
 | Flatpak apps **not** downloaded in chroot | First-boot `t14s-flatpak-apps.service` installs them (~11 min of runtime downloads off the installer) |
 | snap-pac snapshots during install (`SNAP_PAC_SKIP=y`) | snapper can't run in the chroot (`fatal library error, lookup self`); snapshots start after first boot |
@@ -210,8 +210,13 @@ T14S_I_WILL_ERASE=1 \                   # required; also y/yes/on
 T14S_ANSWERS=/path/to/t14s-answers.env \
 T14S_PASS_FILE=/path/to/secrets.env \   # must be mode 0600
 T14S_POST_HOOK_I_UNDERSTAND=1 \         # only if POST_HOOK_URL set
+T14S_POST_HOOK_SHA256=<hex> \           # optional pin of the hook script
 bash install.sh
 ```
+
+`POST_HOOK_URL` must be `https://…` (no userinfo). Optional
+`T14S_POST_HOOK_SHA256` verifies the downloaded script before it runs as root
+in the new system.
 
 Required in answers: `DISK`, `MODE`, identity (`HOSTNAME` `TIMEZONE` `LOCALE`
 `KEYMAP` `USERNAME`), and for AUTO also `ESP_MB` (`1024|2048|4096`). MANUAL
