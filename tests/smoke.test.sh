@@ -15,8 +15,18 @@ bash -n "$ROOT/install.sh" || fail "bash -n failed"
 
 grep -q 'amd_iommu=on' "$ROOT/install.sh" || fail "missing amd_iommu=on"
 grep -q 'amd_pstate=active' "$ROOT/install.sh" || fail "missing amd_pstate=active"
-grep -q 'UCODE=amd-ucode' "$ROOT/install.sh" || fail "must default amd-ucode"
-grep -qE 'intel_iommu=on' "$ROOT/install.sh" && fail "must not set intel_iommu=on" || true
+grep -q 'UCODE=amd-ucode' "$ROOT/install.sh" || fail "must support amd-ucode for t14s"
+grep -q 'UCODE=intel-ucode' "$ROOT/install.sh" || fail "must support intel-ucode for p15"
+grep -q 'HW_PROFILE' "$ROOT/install.sh" || fail "must define HW_PROFILE"
+grep -q 'intel_iommu=on' "$ROOT/install.sh" || fail "p15 path must set intel_iommu=on"
+grep -q 'firewalld' "$ROOT/install.sh" || fail "must install/enable firewalld"
+grep -q 'systemctl mask ufw' "$ROOT/install.sh" \
+  || fail "must mask ufw when enabling firewalld"
+grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$ROOT/install.sh" \
+  && grep -q 'systemctl enable.*\bufw\b' "$ROOT/install.sh" \
+  && fail "must not enable ufw" || true
+grep -q 'ollama.service.d' "$ROOT/install.sh" || fail "must ship ollama override for P15"
+grep -q 'OLLAMA_HOST=127.0.0.1:11434' "$ROOT/install.sh" || fail "ollama must bind localhost"
 
 grep -q 'username cannot be empty' "$ROOT/install.sh" || fail "must reject empty username"
 grep -q "username cannot be 'root'" "$ROOT/install.sh" || fail "must reject username root"
@@ -36,24 +46,25 @@ grep -q 'com.google.Chrome' "$ROOT/install.sh" \
   && fail "Chrome must not be in chroot flatpak loop" || true
 
 grep -q 'LOGIN_HINT' "$ROOT/install.sh" || fail "finish banner must gate on DESKTOP"
-grep -q 'AuthenticAMD' "$ROOT/install.sh" || fail "must gate on AuthenticAMD"
+grep -q 'AuthenticAMD' "$ROOT/install.sh" || fail "must gate T14s on AuthenticAMD"
+grep -q 'GenuineIntel' "$ROOT/install.sh" || fail "must gate P15 on GenuineIntel"
 grep -qF '21C[QR]' "$ROOT/install.sh" || fail "DMI check must use anchored 21C[QR]"
-awk '
-  /ok "target profile: T14s Gen 3 AMD \(21CQ\/21CR\)"/ {
-    if (prev !~ /21C\[QR\]/) { print "FAIL: ok profile not gated by DMI"; exit 1 }
-    found=1
-  }
-  { prev=$0 }
-  END { if (!found) { print "FAIL: missing ok profile"; exit 1 } }
-' "$ROOT/install.sh" \
-  || fail "ok target profile must only print on DMI match"
+grep -qF '20SU' "$ROOT/install.sh" || fail "DMI check must detect P15 20SU"
+grep -q 'target profile: T14s Gen 3 AMD' "$ROOT/install.sh" \
+  || fail "must print T14s target profile"
+grep -q 'target profile: P15 Gen 1' "$ROOT/install.sh" \
+  || fail "must print P15 target profile"
+grep -q 'HW_PROFILE=t14s' "$ROOT/install.sh" || fail "must set HW_PROFILE=t14s on 21CQ/21CR"
+grep -q 'HW_PROFILE=p15' "$ROOT/install.sh" || fail "must set HW_PROFILE=p15 on 20SU"
 grep -q 'vulkan-radeon' "$ROOT/install.sh" || fail "must pacstrap vulkan-radeon"
 grep -q 'mesa' "$ROOT/install.sh" || fail "must pacstrap mesa"
 grep -q 'libva-utils' "$ROOT/install.sh" || fail "must install libva-utils with GNOME"
-grep -q 'LIBVA_DRIVER_NAME=radeonsi' "$ROOT/install.sh" \
-  || fail "must configure LIBVA_DRIVER_NAME=radeonsi for Radeon 680M"
-! grep -q 'LIBVA_DRIVER_NAME=iHD' "$ROOT/install.sh" \
-  || fail "must not set Intel LIBVA_DRIVER_NAME=iHD on AMD T14s"
+grep -q '_libva=radeonsi' "$ROOT/install.sh" \
+  || fail "must default LIBVA to radeonsi for T14s"
+grep -q '_libva=iHD' "$ROOT/install.sh" \
+  || fail "must set LIBVA iHD for P15"
+grep -q 'LIBVA_DRIVER_NAME=${_libva}' "$ROOT/install.sh" \
+  || fail "must write LIBVA_DRIVER_NAME from HW_PROFILE"
 grep -q '61-gdm-wayland.rules' "$ROOT/install.sh" \
   || fail "must install 61-gdm-wayland.rules for AMD 0x1002/0x1681"
 # GDM hardening: check the actual heredoc bodies, not just any line in install.sh.
@@ -377,7 +388,10 @@ assert all(d == "no" for _, d, _ in erase), "erase confirms must default no"
 assert any(p.startswith("ERASE $DISK now?") for p, _, _ in erase), "AUTO disk erase"
 assert any("Proceed with these partitions" in p for p, _, _ in erase), "MANUAL proceed erase"
 assert any("will be ERASED" in p for p, _, _ in erase), "final start erase"
-assert any("Wrong machine?" in p for p, _, _ in critical), "DMI must use critical"
+assert "Hardware profile" in t and "ThinkPad P15 Gen 1" in t, "must offer HW_PROFILE radio"
+warns = [(p, d, s) for p, d, s in calls if s == "warn"]
+assert any("AuthenticAMD" in p for p, _, _ in warns), "T14s CPU mismatch must use warn"
+assert any("GenuineIntel" in p for p, _, _ in warns), "P15 CPU mismatch must use warn"
 assert any("trust the URL" in p for p, _, _ in critical), "hook must use critical"
 proceed = [c for c in calls if "Proceed with these partitions" in c[0]]
 assert len(proceed) == 1 and proceed[0][2] == "erase", proceed
@@ -1220,7 +1234,9 @@ _st="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<.ST.$/{f=1;next} f&&/^ST$/
 [[ -n $_st ]] || fail "could not extract t14s-selftest"
 ! grep -v '^[[:space:]]*#' <<<"$_st" | grep -q 'ufw status' \
   || fail "selftest must not call root-only 'ufw status'"
-grep -q "systemctl is-active --quiet ufw && grep -qx 'ENABLED=yes' /etc/ufw/ufw.conf" <<<"$_st" \
-  || fail "selftest ufw check must use systemctl + ufw.conf"
+grep -q 'check_firewalld' <<<"$_st" \
+  || fail "selftest must check firewalld"
+grep -qE 'systemctl is-(enabled|active) --quiet firewalld' <<<"$_st" \
+  || fail "selftest firewalld check must use systemctl"
 
 echo "PASS: smoke.test.sh"

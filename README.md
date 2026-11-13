@@ -1,15 +1,17 @@
 # t14s-arch-install
 
-Hardened **Arch Linux** installer for **Lenovo ThinkPad T14s Gen 3 AMD**
-(machine type **21CQ / 21CR**; example MTM `21CRS1PU00`).
+Hardened **Arch Linux** Stage A installer for:
+
+* **Lenovo ThinkPad T14s Gen 3 AMD** (type **21CQ / 21CR**; example MTM `21CRS1PU00`)
+* **Lenovo ThinkPad P15 Gen 1** (type **20SU**; Optimus NVIDIA Quadro)
 
 One curl-able script (`install.sh`). Interactive TUI by default; unattended
-with answers + a secrets file. Profile is fixed for Rembrandt (not a generic
-Arch installer).
+with answers + a secrets file. `HW_PROFILE=t14s|p15` is auto-detected from DMI
+(or set in answers). Firewall: **firewalld** (`nftables`, default zone `drop`).
 
 UX ideas adapted from [archfi](https://github.com/MatMoul/archfi) and
 [archdi-pkg](https://github.com/MatMoul/archdi-pkg). Not ported: i18n packs,
-DE zoo, AUR helpers, iptables (UFW kept), multi-bootloader/FS, BIOS modes.
+DE zoo, AUR helpers, multi-bootloader/FS, BIOS modes.
 
 ---
 
@@ -23,7 +25,7 @@ DE zoo, AUR helpers, iptables (UFW kept), multi-bootloader/FS, BIOS modes.
 | Boot | systemd-boot + `sbctl` | Simple EFI; Secure Boot ready |
 | Desktop | Optional minimal GNOME Wayland | Optional; Rembrandt GPU/audio/FP wired when on |
 | Laptop power | Charge window 70–80; PPD or TLP | Battery longevity; no TLP under GNOME |
-| Host hardening | AppArmor, UFW, sysctl, zram | Useful defaults without DIY |
+| Host hardening | AppArmor, firewalld, sysctl, zram | Useful defaults without DIY |
 
 ---
 
@@ -45,7 +47,7 @@ Pacstrapped into the new root every run:
 | `mkinitcpio` | UKI / initramfs build |
 | `snapper` `snap-pac` | Root snapshots (+ pacman hooks) |
 | `zram-generator` | Compressed RAM swap |
-| `apparmor` `ufw` | MAC + firewall (enabled) |
+| `apparmor` `firewalld` | MAC + firewall (enabled) |
 | `sbctl` `efibootmgr` | Secure Boot keys / EFI boot entries |
 | `xdg-user-dirs` | `~/Downloads` etc. via `xdg-user-dirs-update` |
 | `wireless-regdb` | Wi-Fi regulatory database (`regulatory.db`) |
@@ -79,7 +81,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | GNOME | Shell, GDM, portals, PipeWire + `rtkit`, `evolution-data-server` (top-bar calendar), Flatpak browsers/VPN installed by a first-boot service (`t14s-flatpak-apps`, retries every 5 min until online; ~11 min of downloads off the installer), `mesa`/`vulkan-radeon`/`libva-utils`, Radeon 680M Wayland + VA-API (`LIBVA_DRIVER_NAME=radeonsi` in `/etc/environment.d/99-wayland.conf` and GDM override, plus `/etc/udev/rules.d/61-gdm-wayland.rules`), hardened `/etc/gdm/custom.conf` (`DisallowTCP`, XDMCP off, no auto/timed login) and greeter dconf (`/etc/dconf/db/gdm.d/00-login-screen`: hidden user list, 60 s idle), sof audio; `fprintd` unless VM skip | Usable Rembrandt laptop desktop |
 | Nerd Fonts | Curated `ttf-*-nerd` + Inter/Noto; GNOME mono font | Readable terminals / editors |
 | Enroll sbctl now | `sbctl enroll-keys -m` if Setup Mode **and** `sbctl verify` OK | Optional first-boot SB |
-| sshd | `openssh` + UFW 22/tcp | Remote rescue |
+| sshd | `openssh` + firewalld 22/tcp | Remote rescue |
 | CUPS | `cups` `cups-pdf` `ghostscript` | Printing |
 | Skip reflector | Keep ISO mirrorlist | Flaky/offline networks |
 | tuned | `tuned` (+ `tuned-ppd` with GNOME, replaces `power-profiles-daemon`); `tuned-gui` ships in `tuned` | Profiles via GNOME power menu or `tuned-adm` / `tuned-gui` |
@@ -91,7 +93,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | yay | `yay-bin` built as your user, installed with `pacman -U` (no sudoers change) | AUR helper |
 | `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
 | Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
-| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / UFW / `s2idle` / `amd_pstate` / `BAT0` 70–80 / touchpad wakeup / compiled GDM dconf check |
+| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / firewalld / `s2idle` / `amd_pstate` / `BAT0` 70–80 / touchpad wakeup / compiled GDM dconf check |
 | Clean ESP Arch | Remove old Arch UKIs, `arch*.conf` entries, `EFI/arch` | Reinstall hygiene (default on). Kernels/ucode always cleared. Skips other vendors’ `EFI/*` dirs; does not delete `linux-*.conf` (may be non-Arch) |
 | Chrome helper | `~/install-chrome-flatpak.sh` | Chrome needs post-boot Flatpak userns |
 
@@ -115,7 +117,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | wireguard | `wireguard-tools` |
 | tailscale | `tailscale` (enabled) |
 | fail2ban | `fail2ban` + sshd jail |
-| UFW Syncthing / KDE Connect | Port allows only |
+| firewalld Syncthing / KDE Connect | Port allows only |
 
 Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 
@@ -133,7 +135,7 @@ Free-form: `T14S_EXTRA_PKGS='pkg1 pkg2'` or the “more packages” prompt.
 | Target pacman / reflector.conf | Same `pacman.conf` tuning (+ `[multilib]` if chosen); weekly reflector; `paccache.timer` | Same mirror story post-boot; bounded cache |
 | Target `/etc/makepkg.conf.d/t14s.conf` | `MAKEFLAGS=-j$(nproc)`, `!debug`, `lto`, Zen 3+ `x86-64-v3` (`CFLAGS`/`CXXFLAGS`/`RUSTFLAGS`/`GOAMD64=v3`) | Fast Rembrandt-tuned AUR/local builds, no `-debug` packages |
 | Target snapper configs | 5 hourly / 7 daily, `NUMBER_LIMIT=10`, `ALLOW_GROUPS=wheel` | Bounded snapshot space; GUI browse |
-| Target UFW | deny in / allow out; enabled | Firewall on first boot |
+| Target firewalld | deny in / allow out; enabled | Firewall on first boot |
 | Target sudoers | `%wheel` enabled | User admin |
 | ESP | Format or reuse; optional Arch cleanup (`CLEAN_ESP_ARCH`) | Multiboot-safe; frees UKI space |
 | Answers files | `/tmp/t14s-answers.env` + `/root/t14s-answers.env` mode `0600` | Replay flags + `EXTRA_PKGS_LIST` (interactive checklist preserves list extras) |
@@ -243,7 +245,7 @@ repo URL is hardcoded).
 ### Answers schema (known keys)
 
 `PRESET` `DESKTOP` `INSTALL_*` · `ENROLL_SB` `ENABLE_SSHD` `SKIP_REFLECTOR`
-`UFW_SYNCTHING` `UFW_KDECONNECT` `POST_HOOK_URL` · `PACMAN_PARALLEL` `LUKS_WIPE`
+`FW_SYNCTHING` `FW_KDECONNECT` `POST_HOOK_URL` · `PACMAN_PARALLEL` `LUKS_WIPE`
 `HOSTNAME` `TIMEZONE` `LOCALE` `KEYMAP` `USERNAME` · `MODE` `ESP_MB`
 `FORMAT_EFI` `DISK` `EFI_PART` `ROOT_PART` · `BTRFS_COMPRESS`
 (`zstd1`/`zstd3`/`zstd15`/`none`) · `ZRAM_SIZE` (`half`/`quarter`/`8192`) ·
@@ -335,7 +337,7 @@ systemctl status thinkpad-charge-thresholds.service --no-pager
 t14s-selftest   # if that option was enabled
 journalctl -u t14s-flatpak-apps -f   # GNOME: browsers/VPN install once online
 
-# Full read-only verification (~80 checks: cmdline, LUKS/Btrfs, AppArmor/UFW,
+# Full read-only verification (~80 checks: cmdline, LUKS/Btrfs, AppArmor/firewalld,
 # sysctl, charge/touchpad/lid, VA-API, GDM, makepkg, services). Exit 1 on FAIL.
 curl -fsSLO https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/main/tests/host-check.sh
 bash host-check.sh          # as your desktop user

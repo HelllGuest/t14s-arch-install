@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# install.sh — interactive hardened Arch install for ThinkPad T14s Gen 3 AMD
-#               (machine type 21CQ / 21CR; example MTM 21CRS1PU00)
+# install.sh — interactive hardened Arch Stage A for ThinkPad T14s Gen 3 AMD
+#               (21CQ/21CR) and ThinkPad P15 Gen 1 (20SU, Optimus NVIDIA).
 #
-# Target: Rembrandt-U (Ryzen 5/7 PRO 6650U/6850U), soldered LPDDR5, amdgpu,
-#         Wi-Fi 6E, 57Wh, s2idle.
+# Target: Rembrandt-U (amdgpu) or Comet Lake-H + Quadro T1000 (Optimus).
 #
 #   bash <(curl -fsSL https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/main/install.sh)
 #
 # Stack: LUKS2(argon2id) + Btrfs + linux-lts/hardened UKIs + systemd-boot +
-#        sbctl Secure Boot + minimal GNOME. AMD defaults: amd-ucode,
-#        amd_iommu=on, amd_pstate=active. Hostname default: thinkpad-t14s.
+#        sbctl Secure Boot + minimal GNOME + firewalld (nftables, default drop).
+#        T14s: amd-ucode, amd_iommu/amd_pstate. P15: intel-ucode, nvidia modeset.
 #
 # BIOS (F1): Secure Boot off for install; Sleep State = "Windows and Linux"
 # (s2idle); enable AMD SVM + IOMMU. Re-enable Secure Boot after sbctl enroll.
@@ -1198,44 +1197,69 @@ if (( NONINTERACTIVE )); then
   warn "NONINTERACTIVE: skipping welcome TUI (answers + T14S_I_WILL_ERASE gate wipe)"
 else
   ui_step 1 Welcome
-  ui_warn "T14s Gen 3 AMD ARCH INSTALLER — DESTROYS DATA ON DISK
+  ui_warn "THINKPAD STAGE A INSTALLER — DESTROYS DATA ON DISK
 
-Machine: ThinkPad T14s Gen 3 AMD (Type 21CQ/21CR) — Rembrandt + amdgpu
-Stack:   LUKS2 + Btrfs(+@tmp) + linux-lts/hardened + UKI + systemd-boot
-         + minimal GNOME + zram + AppArmor + UFW + Snapper + Secure Boot
+Machines: T14s Gen 3 AMD (21CQ/21CR) or P15 Gen 1 (20SU Optimus)
+Stack:    LUKS2 + Btrfs(+@tmp) + linux-lts/hardened + UKI + systemd-boot
+          + minimal GNOME + zram + AppArmor + firewalld + Snapper + Secure Boot
 
 One question per screen. Backtitle shows Step N/11.
 All answers from /dev/tty. Nothing written until the final Erase confirm.
 Destructive confirms default No. Wipe = Erase/Abort; hard gates = Continue/Abort."
 fi
 
-# Soft DMI check — Gen 3 AMD types only (21CQ/21CR). Anchored to avoid substring noise.
+# Soft DMI check — T14s Gen 3 AMD (21CQ/21CR) or P15 Gen 1 (20SU).
 ui_step 2 Hardware
 _dmi="$(cat /sys/class/dmi/id/product_family /sys/class/dmi/id/product_version \
           /sys/class/dmi/id/product_name /sys/class/dmi/id/product_sku 2>/dev/null \
         | tr '\n' ' ')"
-if echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
-  ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
-else
-  if (( NONINTERACTIVE )); then
-    warn "NONINTERACTIVE: DMI not 21CQ/21CR (${_dmi:-unknown}) — continuing"
-  else
-    ui_yesno "DMI is NOT T14s Gen 3 AMD type 21CQ/21CR:
-${_dmi:-unknown}
-
-Continue only if intentional (VM rehearsal / forced). Wrong machine? Abort." no critical \
-      || die "aborted — this installer is for type 21CQ/21CR only"
+HW_PROFILE="${HW_PROFILE:-}"
+if [[ -z $HW_PROFILE ]]; then
+  if echo "$_dmi" | grep -qiE '(^|[[:space:]_/])21C[QR]([[:alnum:]_-]|$)'; then
+    HW_PROFILE=t14s
+  elif echo "$_dmi" | grep -qiE '(^|[[:space:]_/])20SU([[:alnum:]_-]|$)'; then
+    HW_PROFILE=p15
   fi
 fi
-if ! grep -q AuthenticAMD /proc/cpuinfo; then
-  if (( NONINTERACTIVE )); then
-    warn "NONINTERACTIVE: CPU not AuthenticAMD — continuing (amd-ucode/cmdline still set)"
-  else
-    ui_yesno "CPU is not AuthenticAMD.
-This installer sets amd-ucode + amd_iommu/amd_pstate.
+case ${HW_PROFILE,,} in
+  t14s|thinkpad-t14s) HW_PROFILE=t14s ;;
+  p15|thinkpad-p15) HW_PROFILE=p15 ;;
+  *)
+    if (( NONINTERACTIVE )); then
+      HW_PROFILE=${HW_PROFILE:-t14s}
+      warn "NONINTERACTIVE: DMI not 21CQ/21CR or 20SU (${_dmi:-unknown}) — HW_PROFILE=$HW_PROFILE"
+    else
+      HW_PROFILE="$(ui_radio "Hardware profile (DMI: ${_dmi:-unknown})" \
+        t14s "ThinkPad T14s Gen 3 AMD (21CQ/21CR)" on \
+        p15 "ThinkPad P15 Gen 1 Optimus (20SU)" off)" || die "aborted"
+    fi
+    ;;
+esac
+if [[ $HW_PROFILE == t14s ]]; then
+  ok "target profile: T14s Gen 3 AMD (21CQ/21CR)"
+  if ! grep -q AuthenticAMD /proc/cpuinfo; then
+    if (( NONINTERACTIVE )); then
+      warn "NONINTERACTIVE: CPU not AuthenticAMD — continuing (amd-ucode/cmdline still set)"
+    else
+      ui_yesno "CPU is not AuthenticAMD.
+T14s profile sets amd-ucode + amd_iommu/amd_pstate.
 
 Continue without an AMD CPU (VM rehearsal)?" no warn \
-      || die "aborted — need AuthenticAMD or explicit YES"
+        || die "aborted — need AuthenticAMD or explicit YES"
+    fi
+  fi
+else
+  ok "target profile: P15 Gen 1 (20SU Optimus)"
+  if ! grep -q GenuineIntel /proc/cpuinfo; then
+    if (( NONINTERACTIVE )); then
+      warn "NONINTERACTIVE: CPU not GenuineIntel — continuing (intel-ucode/cmdline still set)"
+    else
+      ui_yesno "CPU is not GenuineIntel.
+P15 profile sets intel-ucode + nvidia_drm modeset.
+
+Continue without an Intel CPU (VM rehearsal)?" no warn \
+        || die "aborted — need GenuineIntel or explicit YES"
+    fi
   fi
 fi
 
@@ -1248,8 +1272,8 @@ ANSWERS_KEYS=(
   INSTALL_STARSHIP INSTALL_CHROME_HINT INSTALL_FAIL2BAN INSTALL_THINKFAN
   INSTALL_SNAPPER_HOME INSTALL_LINUX_STABLE INSTALL_PLYMOUTH INSTALL_SELFTEST
   INSTALL_MULTILIB INSTALL_YAY INSTALL_TUNED INSTALL_DEVTOOLS INSTALL_BTRFS_ASSISTANT
-  CLEAN_ESP_ARCH
-  UFW_SYNCTHING UFW_KDECONNECT POST_HOOK_URL
+  CLEAN_ESP_ARCH HW_PROFILE INSTALL_OLLAMA
+  FW_SYNCTHING FW_KDECONNECT UFW_SYNCTHING UFW_KDECONNECT POST_HOOK_URL
   PACMAN_PARALLEL LUKS_WIPE HOSTNAME TIMEZONE LOCALE KEYMAP USERNAME
   MODE ESP_MB FORMAT_EFI DISK EFI_PART ROOT_PART
   BTRFS_COMPRESS ZRAM_SIZE REFLECTOR_COUNTRY SKIP_THINKPAD_HW
@@ -1443,7 +1467,8 @@ esac
 : "${ENROLL_SB:=N}" "${ENABLE_SSHD:=N}" "${INSTALL_CUPS:=N}" "${SKIP_REFLECTOR:=N}"
 : "${INSTALL_DOCKER:=N}" "${INSTALL_VIRT:=N}" "${INSTALL_WIREGUARD:=N}"
 : "${INSTALL_TAILSCALE:=N}" "${INSTALL_CHROME_HINT:=N}" "${INSTALL_FAIL2BAN:=N}"
-: "${INSTALL_THINKFAN:=N}" "${UFW_SYNCTHING:=N}" "${UFW_KDECONNECT:=N}"
+: "${INSTALL_THINKFAN:=N}" "${FW_SYNCTHING:=${UFW_SYNCTHING:-N}}" "${FW_KDECONNECT:=${UFW_KDECONNECT:-N}}"
+: "${UFW_SYNCTHING:=N}" "${UFW_KDECONNECT:=N}" "${INSTALL_OLLAMA:=N}"
 : "${INSTALL_SNAPPER_HOME:=N}" "${INSTALL_LINUX_STABLE:=N}" "${INSTALL_PLYMOUTH:=N}"
 : "${INSTALL_SELFTEST:=N}" "${CLEAN_ESP_ARCH:=Y}"
 : "${INSTALL_MULTILIB:=N}" "${INSTALL_YAY:=N}" "${INSTALL_TUNED:=N}"
@@ -1763,7 +1788,10 @@ if (( NONINTERACTIVE )); then
   valid_hostname "$HOSTNAME" || die "invalid hostname (DNS labels only): ${HOSTNAME}"
 else
   while :; do
-    HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-thinkpad-t14s}")" || die "aborted"
+    _hn_default=thinkpad-t14s
+    [[ ${HW_PROFILE:-t14s} == p15 ]] && _hn_default=p15
+    HOSTNAME="$(ui_input "Hostname" "${HOSTNAME:-$_hn_default}")" || die "aborted"
+    unset -v _hn_default
     [[ -n $HOSTNAME ]] || { ui_warn "hostname cannot be empty"; continue; }
     valid_hostname "$HOSTNAME" && break
     ui_error "invalid hostname (DNS labels only; no leading/trailing hyphen)"
@@ -1952,6 +1980,7 @@ else
     podman "podman + buildah (rootless)" "$(def_onoff "$INSTALL_PODMAN")" \
     docker "docker + docker-compose (heavier)" "$(def_onoff "$INSTALL_DOCKER")" \
     virt "libvirt + qemu-desktop + virt-manager" "$(def_onoff "$INSTALL_VIRT")" \
+    ollama "ollama-cuda (P15 only; localhost:11434)" "$([[ ${HW_PROFILE:-} == p15 ]] && def_onoff "${INSTALL_OLLAMA:-N}" || echo off)" \
     htop "htop" off \
     tmux "tmux" off \
     rsync "rsync" off \
@@ -1971,8 +2000,8 @@ else
     wireguard "wireguard-tools" "$(def_onoff "$INSTALL_WIREGUARD")" \
     tailscale "tailscale" "$(def_onoff "$INSTALL_TAILSCALE")" \
     fail2ban "fail2ban (useful with sshd)" "$(def_onoff "$INSTALL_FAIL2BAN")" \
-    ufw_syncthing "UFW allow Syncthing 22000/tcp+udp" "$(def_onoff "$UFW_SYNCTHING")" \
-    ufw_kdeconnect "UFW allow KDE Connect 1714:1764/tcp+udp" "$(def_onoff "$UFW_KDECONNECT")")" \
+    fw_syncthing "firewalld allow Syncthing 22000/tcp+udp" "$(def_onoff "${FW_SYNCTHING:-$UFW_SYNCTHING}")" \
+    fw_kdeconnect "firewalld allow KDE Connect 1714:1764/tcp+udp" "$(def_onoff "${FW_KDECONNECT:-$UFW_KDECONNECT}")")" \
     || die "aborted"
 
   DESKTOP=N; INSTALL_NERD_FONTS=N; ENROLL_SB=N; ENABLE_SSHD=N
@@ -1984,7 +2013,7 @@ else
   INSTALL_CLI=N; INSTALL_STARSHIP=N
   INSTALL_PODMAN=N; INSTALL_DOCKER=N; INSTALL_VIRT=N
   INSTALL_AVAHI=N; INSTALL_WIREGUARD=N; INSTALL_TAILSCALE=N
-  INSTALL_FAIL2BAN=N; UFW_SYNCTHING=N; UFW_KDECONNECT=N
+  INSTALL_FAIL2BAN=N; FW_SYNCTHING=N; FW_KDECONNECT=N; INSTALL_OLLAMA=N
   # Preserve packages already loaded from EXTRA_PKGS_LIST (answers replay).
   _extras_keep=("${EXTRA_PKGS[@]}")
   EXTRA_PKGS=()
@@ -2014,6 +2043,8 @@ else
   flag_from_opts "$OPTS_TOOLS" podman && INSTALL_PODMAN=Y || true
   flag_from_opts "$OPTS_TOOLS" docker && INSTALL_DOCKER=Y || true
   flag_from_opts "$OPTS_TOOLS" virt && INSTALL_VIRT=Y || true
+  flag_from_opts "$OPTS_TOOLS" ollama && INSTALL_OLLAMA=Y || true
+  [[ ${HW_PROFILE:-} == p15 ]] || INSTALL_OLLAMA=N
   flag_from_opts "$OPTS_TOOLS" htop && EXTRA_PKGS+=(htop) || true
   flag_from_opts "$OPTS_TOOLS" tmux && EXTRA_PKGS+=(tmux) || true
   flag_from_opts "$OPTS_TOOLS" rsync && EXTRA_PKGS+=(rsync) || true
@@ -2032,8 +2063,8 @@ else
   flag_from_opts "$OPTS_NET" wireguard && INSTALL_WIREGUARD=Y || true
   flag_from_opts "$OPTS_NET" tailscale && INSTALL_TAILSCALE=Y || true
   flag_from_opts "$OPTS_NET" fail2ban && INSTALL_FAIL2BAN=Y || true
-  flag_from_opts "$OPTS_NET" ufw_syncthing && UFW_SYNCTHING=Y || true
-  flag_from_opts "$OPTS_NET" ufw_kdeconnect && UFW_KDECONNECT=Y || true
+  flag_from_opts "$OPTS_NET" fw_syncthing && FW_SYNCTHING=Y || true
+  flag_from_opts "$OPTS_NET" fw_kdeconnect && FW_KDECONNECT=Y || true
 
   # Re-apply answers extras after checklist rebuild (dedupe later at pacstrap).
   if ((${#_extras_keep[@]})); then
@@ -2326,8 +2357,10 @@ clean_esp_arch_files /mnt/boot
 ok "filesystems mounted (ESP ${esp_mb}MB)"
 
 # ── 6. base install ─────────────────────────────────────────
-# Rembrandt target — always amd-ucode (non-AMD already confirmed at preflight).
-UCODE=amd-ucode
+case ${HW_PROFILE:-t14s} in
+  p15) UCODE=intel-ucode ;;
+  *)   UCODE=amd-ucode ;;
+esac
 
 # Reflector rates every candidate mirror by downloading its repo DB. Without
 # --threads that loop is serial, so a handful of dead mirrors stall the install
@@ -2370,7 +2403,7 @@ BASE_PKGS=(
   networkmanager sudo zsh git vim nano
   reflector pacman-contrib
   mkinitcpio snapper snap-pac zram-generator
-  apparmor ufw sbctl efibootmgr
+  apparmor firewalld sbctl efibootmgr
   wireless-regdb
   xdg-user-dirs
 )
@@ -2541,9 +2574,16 @@ grep -Eq '^HOOKS=.*sd-encrypt' /etc/mkinitcpio.conf \
 
 # kernel cmdline (shared by UKIs)
 mkdir -p /etc/kernel
-# AMD Rembrandt: amd_iommu + amd_pstate (no intel_iommu / i915). BIOS Sleep =
-# "Windows and Linux" pairs with mem_sleep_default=s2idle.
-_cmdline="rd.luks.name=${LUKS_UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle apparmor=1 security=apparmor amd_iommu=on amd_pstate=active"
+# BIOS Sleep = "Windows and Linux" pairs with mem_sleep_default=s2idle.
+_cmdline="rd.luks.name=${LUKS_UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle apparmor=1 security=apparmor"
+case ${HW_PROFILE:-t14s} in
+  p15)
+    _cmdline+=" intel_iommu=on nvidia_drm.modeset=1 rd.driver.blacklist=nouveau"
+    ;;
+  *)
+    _cmdline+=" amd_iommu=on amd_pstate=active"
+    ;;
+esac
 if yn_on "${INSTALL_PLYMOUTH}"; then
   _cmdline+=" splash"
 fi
@@ -2767,11 +2807,21 @@ EOF
 # userns: needed for Flatpak under linux-hardened; '-' = ignore on LTS (key absent)
 echo '-kernel.unprivileged_userns_clone = 1' > /etc/sysctl.d/99-userns.conf
 
-# firewall — set ENABLED=yes so it's active on first boot (rule-apply may warn in chroot)
-ufw default deny incoming
-ufw default allow outgoing
-ufw --force enable >/dev/null 2>&1 || true
-grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null || sed -i 's/^ENABLED=.*/ENABLED=yes/' /etc/ufw/ufw.conf 2>/dev/null || true
+# firewalld (nftables) — default zone drop (deny inbound). May warn in chroot.
+mkdir -p /etc/firewalld
+if [[ ! -f /etc/firewalld/firewalld.conf ]]; then
+  printf '%s\n' '# seeded by Stage A' 'DefaultZone=drop' 'FirewallBackend=nftables' \
+    > /etc/firewalld/firewalld.conf
+else
+  sed -i 's/^FirewallBackend=.*/FirewallBackend=nftables/' /etc/firewalld/firewalld.conf || true
+  grep -q '^FirewallBackend=' /etc/firewalld/firewalld.conf \
+    || echo 'FirewallBackend=nftables' >> /etc/firewalld/firewalld.conf
+  if grep -q '^DefaultZone=' /etc/firewalld/firewalld.conf; then
+    sed -i 's/^DefaultZone=.*/DefaultZone=drop/' /etc/firewalld/firewalld.conf
+  else
+    echo 'DefaultZone=drop' >> /etc/firewalld/firewalld.conf
+  fi
+fi
 
 # reflector mirrors (weekly timer; rate-rating must not serialize on dead mirrors)
 {
@@ -2785,9 +2835,12 @@ grep -q '^ENABLED=yes' /etc/ufw/ufw.conf 2>/dev/null || sed -i 's/^ENABLED=.*/EN
 
 
 stage 30 34 "services and snapshots"
-# services
-systemctl enable NetworkManager apparmor ufw bluetooth fstrim.timer reflector.timer \
+# services (mask ufw so it never fights firewalld on nftables)
+systemctl disable --now ufw 2>/dev/null || true
+systemctl mask ufw 2>/dev/null || true
+systemctl enable NetworkManager apparmor firewalld bluetooth fstrim.timer reflector.timer \
                  systemd-tmpfiles-clean.timer
+
 
 # snapper config for / (handle pre-existing @snapshots mount) — non-fatal
 umount /.snapshots 2>/dev/null || true
@@ -2838,9 +2891,17 @@ if yn_on "$DESKTOP"; then
     flatpak fwupd bolt pipewire pipewire-pulse wireplumber earlyoom
     rtkit evolution-data-server
     sof-firmware alsa-ucm-conf
-    mesa vulkan-radeon libva-utils
     gnome-software
   )
+  case ${HW_PROFILE:-t14s} in
+    p15)
+      _gnome_pkgs+=(mesa vulkan-intel intel-media-driver libva-utils
+        nvidia-open-dkms nvidia-utils nvidia-prime egl-wayland)
+      ;;
+    *)
+      _gnome_pkgs+=(mesa vulkan-radeon libva-utils)
+      ;;
+  esac
   # rtkit: realtime for PipeWire + gnome-shell KMS thread.
   # evolution-data-server: gnome-shell CalendarServer (top-bar calendar).
   # Power profiles: tuned + tuned-ppd (provides/conflicts power-profiles-daemon;
@@ -2929,8 +2990,10 @@ EOF
       sed -i 's/^enable-fingerprint-authentication=true$/enable-fingerprint-authentication=false/' \
         /etc/dconf/db/gdm.d/00-login-screen
     fi
-    cat > /etc/environment.d/99-wayland.conf <<'EOF'
-# Wayland + VA-API defaults for GNOME Shell on AMD Radeon 680M (radeonsi)
+    _libva=radeonsi
+    [[ ${HW_PROFILE:-t14s} == p15 ]] && _libva=iHD
+    cat > /etc/environment.d/99-wayland.conf <<EOF
+# Wayland + VA-API defaults for GNOME Shell (${_libva})
 OZONE_PLATFORM=wayland
 MOZ_ENABLE_WAYLAND=1
 MOZ_DBUS_REMOTE=1
@@ -2939,9 +3002,22 @@ QT_WAYLAND_DISABLE_WINDOWDECORATION=1
 ELECTRON_OZONE_PLATFORM_HINT=wayland
 SDL_VIDEODRIVER=wayland
 CLUTTER_BACKEND=wayland
-LIBVA_DRIVER_NAME=radeonsi
+LIBVA_DRIVER_NAME=${_libva}
 EOF
-    cat > /etc/udev/rules.d/61-gdm-wayland.rules <<'EOF'
+    if [[ ${HW_PROFILE:-t14s} == p15 ]]; then
+      cat > /etc/udev/rules.d/61-gdm-wayland.rules <<'EOF'
+# Intel + NVIDIA Optimus — keep GDM on Wayland
+SUBSYSTEM=="drm", KERNEL=="card*", \
+  ATTRS{vendor}=="0x8086", \
+  TAG+="seat", TAG+="uaccess", \
+  ENV{GDM_DISABLE_WAYLAND}=""
+
+SUBSYSTEM=="drm", KERNEL=="card*", \
+  ATTRS{vendor}=="0x10de", \
+  ENV{GDM_DISABLE_WAYLAND}=""
+EOF
+    else
+      cat > /etc/udev/rules.d/61-gdm-wayland.rules <<'EOF'
 # AMD Radeon 680M Rembrandt (1002:1681) — keep GDM on Wayland
 SUBSYSTEM=="drm", KERNEL=="card*", \
   ATTRS{vendor}=="0x1002", ATTRS{device}=="0x1681", \
@@ -2952,18 +3028,20 @@ SUBSYSTEM=="drm", KERNEL=="card*", \
   ATTRS{vendor}=="0x1002", \
   ENV{GDM_DISABLE_WAYLAND}=""
 EOF
-    cat > /etc/systemd/system/gdm.service.d/override.conf <<'EOF'
+    fi
+    cat > /etc/systemd/system/gdm.service.d/override.conf <<EOF
 # /etc/systemd/system/gdm.service.d/override.conf
 
 [Service]
 Environment=GDK_BACKEND=wayland
 Environment=CLUTTER_BACKEND=wayland
 Environment=QT_QPA_PLATFORM=wayland
-Environment=LIBVA_DRIVER_NAME=radeonsi
+Environment=LIBVA_DRIVER_NAME=${_libva}
 OOMScoreAdjust=-500
 Restart=always
 RestartSec=1s
 EOF
+    unset -v _libva
     flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo || true
     # Flatpak apps install on FIRST BOOT, not here: their runtimes (two
     # freedesktop versions + GL/codecs/locale + GNOME) are pure download and
@@ -3265,13 +3343,13 @@ if yn_on "${INSTALL_YAY}"; then
 fi
 
 # UFW extras
-if yn_on "${UFW_SYNCTHING}"; then
-  ufw allow 22000/tcp comment 'syncthing' || true
-  ufw allow 22000/udp comment 'syncthing' || true
+if yn_on "${FW_SYNCTHING:-${UFW_SYNCTHING:-N}}"; then
+  firewall-cmd --permanent --add-port=22000/tcp || true
+  firewall-cmd --permanent --add-port=22000/udp || true
 fi
-if yn_on "${UFW_KDECONNECT}"; then
-  ufw allow 1714:1764/tcp comment 'kdeconnect' || true
-  ufw allow 1714:1764/udp comment 'kdeconnect' || true
+if yn_on "${FW_KDECONNECT:-${UFW_KDECONNECT:-N}}"; then
+  firewall-cmd --permanent --add-port=1714-1764/tcp || true
+  firewall-cmd --permanent --add-port=1714-1764/udp || true
 fi
 
 stage 92 95 "helpers and self-test"
@@ -3310,15 +3388,15 @@ check_wifi() {
   nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
     || nmcli networking connectivity 2>/dev/null | grep -qi full
 }
-# `ufw status` needs root; this helper runs as the user (pipewire check).
-check_ufw() {
-  systemctl is-active --quiet ufw && grep -qx 'ENABLED=yes' /etc/ufw/ufw.conf
+# firewalld status (user-callable; no root required for is-enabled).
+check_firewalld() {
+  systemctl is-enabled --quiet firewalld 2>/dev/null || systemctl is-active --quiet firewalld
 }
 check bluetooth systemctl is-active --quiet bluetooth
 check pipewire check_pipewire
 check wifi check_wifi
 check apparmor systemctl is-active --quiet apparmor
-check ufw check_ufw
+check firewalld check_firewalld
 check mem_sleep grep -q '\[s2idle\]' /sys/power/mem_sleep
 if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver ]]; then
   check amd_pstate grep -q '^amd-pstate' /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
@@ -3374,7 +3452,23 @@ if yn_on "${ENABLE_SSHD}"; then
   say "enabling OpenSSH (sshd + UFW 22/tcp)"
   if pkg_try "openssh" openssh; then
     systemctl enable sshd
-    ufw allow 22/tcp comment 'ssh' || true
+    firewall-cmd --permanent --add-service=ssh || true
+  fi
+fi
+
+# Optional local LLM (P15 Quadro T1000 4GB) — bind localhost only.
+if yn_on "${INSTALL_OLLAMA:-N}" && [[ ${HW_PROFILE:-} == p15 ]]; then
+  if pkg_try "ollama-cuda" ollama-cuda || pkg_try "ollama" ollama; then
+    mkdir -p /etc/systemd/system/ollama.service.d
+    cat > /etc/systemd/system/ollama.service.d/override.conf <<'OLL'
+[Service]
+Environment=OLLAMA_HOST=127.0.0.1:11434
+Environment=OLLAMA_FLASH_ATTENTION=1
+Environment=OLLAMA_KV_CACHE_TYPE=q8_0
+Environment=OLLAMA_KEEP_ALIVE=5m
+OLL
+    systemctl enable ollama.service || true
+    say "ollama enabled on 127.0.0.1:11434 — pull qwen2.5-coder:3b and qwen3.5:4b after first boot"
   fi
 fi
 if yn_on "${INSTALL_FAIL2BAN}"; then
@@ -3438,6 +3532,8 @@ if ! run_gauge "chroot config (UKIs, users, optional GNOME)" 0 100 \
     INSTALL_SELFTEST="$INSTALL_SELFTEST" CLEAN_ESP_ARCH="$CLEAN_ESP_ARCH" \
     ZRAM_SIZE="$ZRAM_SIZE" REFLECTOR_COUNTRY="$REFLECTOR_COUNTRY" \
     SKIP_THINKPAD_HW="$SKIP_THINKPAD_HW" \
+    HW_PROFILE="$HW_PROFILE" INSTALL_OLLAMA="$INSTALL_OLLAMA" \
+    FW_SYNCTHING="$FW_SYNCTHING" FW_KDECONNECT="$FW_KDECONNECT" \
     UFW_SYNCTHING="$UFW_SYNCTHING" UFW_KDECONNECT="$UFW_KDECONNECT" \
     SNAP_PAC_SKIP=y \
     bash /root/chroot-setup.sh
