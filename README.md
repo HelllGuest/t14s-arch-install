@@ -366,10 +366,15 @@ bash scripts/configure.sh   # firewalld migrate (virbr0→libvirt, virbr-malware
                             # Gruvbox rice, P15 ollama-setup
 # or:
 ./install.sh                # full Stage B (Caveman + Ponytail complementary hooks)
+
+# If virbr-malware still shows under libvirt/block (pre-lab-malware hosts):
+bash scripts/firewalld-migrate.sh
+firewall-cmd --get-active-zones   # expect virbr-malware under lab-malware only
 ```
 
 Lab wrappers after SETUP_LABS: `lab-triage` / `lab-re` / `lab-android` / `lab-web` /
 `lab-detonate` / `lab-mcp`. REA backends live in `lab-re` (`rea-agents@6.9.0`).
+Live verify checklist: `~/dotfiles/README.md` → Maintenance → Live health checklist.
 
 Same notes (plus any install warnings) land in `/root/t14s-post-install.txt`.
 
