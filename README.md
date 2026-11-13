@@ -357,15 +357,31 @@ sudo less /var/log/t14s-install.log  # full installer log
 ### Stage B (dotfiles)
 
 On the installed host, open your local `~/dotfiles` checkout (sibling repo), then
-either the TUI modules or full bootstrap:
+either the modular TUI or full bootstrap.
+
+#### How to: `configure.sh` TUI
+
+Needs a real TTY (GNOME terminal). Backend: dialog → whiptail → plain. Modules
+**fail-fast** (one failure stops the run).
 
 ```bash
 cd ~/dotfiles
-bash scripts/configure.sh   # firewalld migrate (virbr0→libvirt, virbr-malware→lab-malware),
-                            # labs, AI stack (Headroom/hr-*, Ponytail, Continue FIM),
-                            # Gruvbox rice, P15 ollama-setup
-# or:
-./install.sh                # full Stage B (Caveman + Ponytail complementary hooks)
+bash scripts/configure.sh
+```
+
+| Tag | Default | Notes |
+|-----|---------|-------|
+| `MIGRATE_FIREWALLD` | on | `virbr0`→`libvirt`, `virbr-malware`→`lab-malware` (DROP) |
+| `APPLY_PROFILE` | off | hostname / DMI profile |
+| `SETUP_OLLAMA` | on if `HW_PROFILE`/DMI is P15 `20SU` | skipped on T14s with a message |
+| `SETUP_LABS` | off | `lab-triage` / `lab-re` / `lab-android` / `lab-web` |
+| `SETUP_DETONATE` | off | INetSim/PolarProxy + disposable VMs |
+| `SETUP_AI` | off | Headroom/`hr-*`, Ponytail, Continue FIM (not Caveman) |
+| `SETUP_RICE` | off | Gruvbox + privacy notifications |
+
+```bash
+# or full Stage B (Caveman + Ponytail complementary hooks):
+./install.sh
 
 # If virbr-malware still shows under libvirt/block (pre-lab-malware hosts):
 bash scripts/firewalld-migrate.sh
