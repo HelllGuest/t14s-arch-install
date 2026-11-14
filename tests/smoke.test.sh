@@ -39,6 +39,8 @@ grep -q 'configure_firewalld' "$INSTALL_SH" || fail "must define configure_firew
 grep -q 'DefaultZone=drop' "$INSTALL_SH" || fail "must set firewalld DefaultZone=drop"
 grep -q 'htop btop fastfetch' "$ROOT/lib/50-packages.sh" \
   || fail "base packages must always include htop btop fastfetch"
+grep -q 'github-cli glab' "$ROOT/lib/50-packages.sh" \
+  || fail "base packages must always include github-cli glab"
 grep -q 'pacman -Rns --noconfirm ufw' "$ROOT/lib/70-firewall.sh" \
   || fail "configure_firewalld must remove ufw package when present"
 ! grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$ROOT/lib/50-packages.sh" \

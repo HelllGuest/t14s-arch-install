@@ -57,6 +57,7 @@ Pacstrapped into the new root every run:
 | `xdg-user-dirs` | `~/Downloads` etc. via `xdg-user-dirs-update` |
 | `wireless-regdb` | Wi-Fi regulatory database (`regulatory.db`) |
 | `htop` `btop` `fastfetch` | Always-on CLI monitors |
+| `github-cli` `glab` | Always-on forge CLIs (`gh`, `glab`) |
 
 **Always configured (not always “a package”):**
 
@@ -113,7 +114,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | podman | `podman` `buildah` (rootless) |
 | docker | `docker` `docker-compose`; user in `docker` group |
 | virt | `libvirt` `qemu-desktop` `virt-manager` …; user in `libvirt` |
-| extras | Optional: tmux, rsync, bash-completion, wget, usbutils, lsof, dmidecode, powertop, mc, traceroute, bind, smartmontools (`htop`/`btop`/`fastfetch` are always in base) |
+| extras | Optional: tmux, rsync, bash-completion, wget, usbutils, lsof, dmidecode, powertop, mc, traceroute, bind, smartmontools (`htop`/`btop`/`fastfetch`/`github-cli`/`glab` are always in base) |
 
 ### Network checklist
 
