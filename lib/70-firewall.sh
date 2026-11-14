@@ -57,7 +57,7 @@ configure_firewalld() {
   fi
 
   # Syncthing: transfer 22000/tcp (+ optional quic 22000/udp), discovery 21027/udp
-  if yn_on "${FW_SYNCTHING:-${UFW_SYNCTHING:-N}}"; then
+  if yn_on "${FW_SYNCTHING:-N}"; then
     _fw_perm --add-port=22000/tcp \
       || _fw_warn "firewalld: could not allow Syncthing 22000/tcp"
     _fw_perm --add-port=22000/udp \
@@ -66,7 +66,7 @@ configure_firewalld() {
       || _fw_warn "firewalld: could not allow Syncthing 21027/udp"
   fi
 
-  if yn_on "${FW_KDECONNECT:-${UFW_KDECONNECT:-N}}"; then
+  if yn_on "${FW_KDECONNECT:-N}"; then
     _fw_perm --add-port=1714-1764/tcp \
       || _fw_warn "firewalld: could not allow KDE Connect tcp"
     _fw_perm --add-port=1714-1764/udp \

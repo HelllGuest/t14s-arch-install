@@ -9,7 +9,7 @@ Curl-able orchestrator (`install.sh`) plus `lib/*.sh` modules. Interactive TUI
 by default; unattended with answers + a secrets file. `HW_PROFILE=t14s|p15` is
 auto-detected from DMI (or set in answers). Firewall: **firewalld**
 (`nftables`, default zone `drop`; UFW masked if present). Optional ports:
-`FW_SYNCTHING` / `FW_KDECONNECT` (legacy `UFW_*` answers still accepted).
+`FW_SYNCTHING` / `FW_KDECONNECT` (firewalld port allows).
 P15-only optional **`ollama-cuda`** binds `127.0.0.1:11434` (Quadro T1000 4GB).
 Stage B (labs / AI / rice / firewalld zones) lives in the sibling local
 `~/dotfiles` tree (`configure.sh` / `install.sh`).
@@ -264,9 +264,6 @@ or `linux-*.conf`) · `INSTALL_MULTILIB` `INSTALL_YAY` `INSTALL_TUNED`
 Passwords are **never** stored in answers. `answers_save` hard-requires mode
 `0600`. `T14S_NONINTERACTIVE` / `T14S_I_WILL_ERASE` accept `1` / `y` / `yes` /
 `on`.
-
-**Migration:** old answers with `UFW_SYNCTHING` / `UFW_KDECONNECT` still work;
-new saves prefer `FW_*`. Rename when convenient.
 
 ### Message severity
 

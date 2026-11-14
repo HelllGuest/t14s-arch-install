@@ -43,6 +43,10 @@ grep -q 'pacman -Rns --noconfirm ufw' "$ROOT/lib/70-firewall.sh" \
   || fail "configure_firewalld must remove ufw package when present"
 ! grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$ROOT/lib/50-packages.sh" \
   || fail "base packages must not include ufw"
+! grep -qE '\bUFW_(SYNCTHING|KDECONNECT)\b' "$ROOT/install.sh" "$ROOT/lib/70-firewall.sh" \
+  || fail "UFW_* answer compat must be removed (FW_* only)"
+! test -e "$ROOT/install.sh.monolithic" \
+  || fail "install.sh.monolithic must be deleted (modular install.sh is canonical)"
 grep -q 'firewall-offline-cmd' "$INSTALL_SH" \
   || fail "chroot firewall must prefer firewall-offline-cmd"
 grep -q 'T14S_LIB_DIR' "$ROOT/install.sh" || fail "orchestrator must support T14S_LIB_DIR"
@@ -748,7 +752,7 @@ import re, sys, subprocess, tempfile
 body = Path(sys.argv[1]).read_text()
 assert "yn_on() {" in body, "chroot missing yn_on"
 assert not re.search(r'yn_on[^\n]*"\]', body), "stray ] after yn_on"
-assert not re.search(r'\$\{(?:INSTALL_|SKIP_|DESKTOP|ENROLL_|ENABLE_|UFW_)[A-Z0-9_]*\^\^\}', body), \
+assert not re.search(r'\$\{(?:INSTALL_|SKIP_|DESKTOP|ENROLL_|ENABLE_|FW_)[A-Z0-9_]*\^\^\}', body), \
     "chroot still uses ^^ on feature flags"
 assert "sd-encrypt" in body and "HOOKS missing sd-encrypt" in body
 with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
