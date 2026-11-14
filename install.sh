@@ -26,7 +26,8 @@
 set -euo pipefail
 
 # ── library loader ──────────────────────────────────────────
-# Curl path: resolve one commit for install.sh + every lib/*.sh (no mixed tip).
+# Prefer local lib/ (checkout or T14S_LIB_DIR). Only then resolve one commit for
+# curl fetches (install.sh + every lib/*.sh share that SHA; no mixed tip).
 # Override: T14S_REF=<sha|branch|tag>, T14S_BASE_URL=…, or local T14S_LIB_DIR.
 T14S_LIB_DIR="${T14S_LIB_DIR:-}"
 if [[ -z $T14S_LIB_DIR ]]; then
@@ -36,7 +37,8 @@ if [[ -z $T14S_LIB_DIR ]]; then
   fi
   unset -v _t14s_self
 fi
-if [[ -z ${T14S_BASE_URL:-} ]]; then
+# Remote resolve only when libs must be fetched (local checkout stays offline).
+if [[ -z $T14S_LIB_DIR && -z ${T14S_BASE_URL:-} ]]; then
   if [[ -z ${T14S_REF:-} ]]; then
     T14S_REF="$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
       https://api.github.com/repos/HelllGuest/t14s-arch-install/commits/main 2>/dev/null || true)"
@@ -48,7 +50,7 @@ if [[ -z ${T14S_BASE_URL:-} ]]; then
   fi
   T14S_BASE_URL="https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/${T14S_REF}"
 fi
-export T14S_REF T14S_BASE_URL
+export T14S_REF="${T14S_REF:-}" T14S_BASE_URL="${T14S_BASE_URL:-}" T14S_LIB_DIR
 
 # Defaults needed before any sourced lib runs say()/die under set -u
 LOGGING=0

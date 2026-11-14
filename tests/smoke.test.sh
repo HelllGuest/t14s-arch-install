@@ -54,8 +54,34 @@ grep -q 'firewall-offline-cmd' "$INSTALL_SH" \
 grep -q 'T14S_LIB_DIR' "$ROOT/install.sh" || fail "orchestrator must support T14S_LIB_DIR"
 grep -q "application/vnd.github.sha" "$ROOT/install.sh" \
   || fail "curl path must resolve main→SHA (Accept: application/vnd.github.sha)"
+grep -q 'T14S_LIB_DIR && -z ${T14S_BASE_URL' "$ROOT/install.sh" \
+  || fail "SHA resolve must run only when local lib/ is absent"
 grep -qE 'T14S_REF:=69d4483' "$ROOT/install.sh" \
   && fail "must not hardcode a stale T14S_REF commit pin" || true
+# Offline: checkout with lib/ beside install.sh must not need GitHub API
+if command -v unshare >/dev/null 2>&1 && unshare -rn true 2>/dev/null; then
+  _off_tmp="$(mktemp -d /tmp/t14s-off.XXXXXX)"
+  ln -s "$ROOT/lib" "$_off_tmp/lib"
+  sed -n '/^# ── library loader/,/^export T14S_REF/p' "$ROOT/install.sh" \
+    >"$_off_tmp/probe.sh"
+  printf '%s\n' \
+    '[[ -n ${T14S_LIB_DIR:-} ]] || { echo "ERR: T14S_LIB_DIR empty"; exit 1; }' \
+    '[[ -f $T14S_LIB_DIR/00-common.sh ]] || { echo "ERR: missing 00-common"; exit 1; }' \
+    'printf "ok offline local lib\n"' >>"$_off_tmp/probe.sh"
+  _off_err="$(
+    unshare -rn env -u T14S_LIB_DIR -u T14S_BASE_URL -u T14S_REF \
+      PATH="$PATH" HOME=/tmp TMPDIR=/tmp \
+      bash "$_off_tmp/probe.sh" 2>&1
+  )" || {
+    printf '%s\n' "$_off_err" >&2
+    rm -rf -- "$_off_tmp"
+    fail "offline checkout must resolve lib/ without GitHub API"
+  }
+  echo "$_off_err" | grep -q 'ok offline local lib' \
+    || { rm -rf -- "$_off_tmp"; fail "offline local lib probe: $_off_err"; }
+  rm -rf -- "$_off_tmp"
+  unset -v _off_tmp _off_err
+fi
 grep -q 'is-active --quiet firewalld' "$ROOT/lib/80-chroot-setup.sh" \
   || fail "chroot check_firewalld must prefer is-active (sync with 70-firewall)"
 grep -q '70-firewall.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 70-firewall.sh"
