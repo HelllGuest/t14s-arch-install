@@ -43,9 +43,13 @@ configure_firewalld() {
     fi
   fi
 
-  # Never let ufw fight firewalld on nftables.
+  # Never let ufw fight firewalld on nftables — mask unit and drop package.
   systemctl disable --now ufw 2>/dev/null || true
   systemctl mask ufw 2>/dev/null || true
+  if command -v pacman >/dev/null 2>&1 && pacman -Q ufw >/dev/null 2>&1; then
+    pacman -Rns --noconfirm ufw 2>/dev/null \
+      || _fw_warn "firewalld: could not remove ufw package"
+  fi
 
   if yn_on "${ENABLE_SSHD:-N}"; then
     _fw_perm --add-service=ssh \

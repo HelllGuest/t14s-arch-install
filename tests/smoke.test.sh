@@ -37,6 +37,12 @@ grep -q 'firewalld' "$INSTALL_SH" || fail "must install/enable firewalld"
 
 grep -q 'configure_firewalld' "$INSTALL_SH" || fail "must define configure_firewalld"
 grep -q 'DefaultZone=drop' "$INSTALL_SH" || fail "must set firewalld DefaultZone=drop"
+grep -q 'htop btop fastfetch' "$ROOT/lib/50-packages.sh" \
+  || fail "base packages must always include htop btop fastfetch"
+grep -q 'pacman -Rns --noconfirm ufw' "$ROOT/lib/70-firewall.sh" \
+  || fail "configure_firewalld must remove ufw package when present"
+! grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$ROOT/lib/50-packages.sh" \
+  || fail "base packages must not include ufw"
 grep -q 'firewall-offline-cmd' "$INSTALL_SH" \
   || fail "chroot firewall must prefer firewall-offline-cmd"
 grep -q 'T14S_LIB_DIR' "$ROOT/install.sh" || fail "orchestrator must support T14S_LIB_DIR"

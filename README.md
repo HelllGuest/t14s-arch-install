@@ -52,10 +52,11 @@ Pacstrapped into the new root every run:
 | `mkinitcpio` | UKI / initramfs build |
 | `snapper` `snap-pac` | Root snapshots (+ pacman hooks) |
 | `zram-generator` | Compressed RAM swap |
-| `apparmor` `firewalld` | MAC + firewall (enabled) |
+| `apparmor` `firewalld` | MAC + firewall (enabled); **no UFW** (masked/removed) |
 | `sbctl` `efibootmgr` | Secure Boot keys / EFI boot entries |
 | `xdg-user-dirs` | `~/Downloads` etc. via `xdg-user-dirs-update` |
 | `wireless-regdb` | Wi-Fi regulatory database (`regulatory.db`) |
+| `htop` `btop` `fastfetch` | Always-on CLI monitors |
 
 **Always configured (not always “a package”):**
 
@@ -112,7 +113,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | podman | `podman` `buildah` (rootless) |
 | docker | `docker` `docker-compose`; user in `docker` group |
 | virt | `libvirt` `qemu-desktop` `virt-manager` …; user in `libvirt` |
-| extras | Optional: htop, tmux, rsync, bash-completion, wget, usbutils, lsof, dmidecode, powertop, mc, traceroute, bind, smartmontools |
+| extras | Optional: tmux, rsync, bash-completion, wget, usbutils, lsof, dmidecode, powertop, mc, traceroute, bind, smartmontools (`htop`/`btop`/`fastfetch` are always in base) |
 
 ### Network checklist
 

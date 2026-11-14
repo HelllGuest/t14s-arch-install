@@ -767,7 +767,6 @@ else
     docker "docker + docker-compose (heavier)" "$(def_onoff "$INSTALL_DOCKER")" \
     virt "libvirt + qemu-desktop + virt-manager" "$(def_onoff "$INSTALL_VIRT")" \
     ollama "ollama-cuda (P15 only; localhost:11434)" "$([[ ${HW_PROFILE:-} == p15 ]] && def_onoff "${INSTALL_OLLAMA:-N}" || echo off)" \
-    htop "htop" off \
     tmux "tmux" off \
     rsync "rsync" off \
     bash_completion "bash-completion" off \
@@ -831,7 +830,7 @@ else
   flag_from_opts "$OPTS_TOOLS" virt && INSTALL_VIRT=Y || true
   flag_from_opts "$OPTS_TOOLS" ollama && INSTALL_OLLAMA=Y || true
   [[ ${HW_PROFILE:-} == p15 ]] || INSTALL_OLLAMA=N
-  flag_from_opts "$OPTS_TOOLS" htop && EXTRA_PKGS+=(htop) || true
+  # htop/btop/fastfetch ship in BASE_PKGS (always installed with firewalld).
   flag_from_opts "$OPTS_TOOLS" tmux && EXTRA_PKGS+=(tmux) || true
   flag_from_opts "$OPTS_TOOLS" rsync && EXTRA_PKGS+=(rsync) || true
   flag_from_opts "$OPTS_TOOLS" bash_completion && EXTRA_PKGS+=(bash-completion) || true

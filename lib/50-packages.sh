@@ -20,6 +20,8 @@ t14s_base_packages() {
     apparmor firewalld sbctl efibootmgr
     wireless-regdb
     xdg-user-dirs
+    # Always-on CLI monitors (no UFW — firewalld only)
+    htop btop fastfetch
   )
   if yn_on "${INSTALL_LINUX_STABLE:-N}"; then
     BASE_PKGS+=(linux linux-headers)
