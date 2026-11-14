@@ -73,8 +73,11 @@ configure_firewalld() {
       || _fw_warn "firewalld: could not allow KDE Connect udp"
   fi
 
-  # Live reload only when the daemon is up (skip in chroot / offline path).
-  if systemctl is-active --quiet firewalld 2>/dev/null; then
+  # Live reload only when a daemon is actually answering. In arch-chroot
+  # `systemctl is-active` can still report success, so skip chroots explicitly
+  # and ask firewalld itself (--state) instead of systemd.
+  if ! systemd-detect-virt --chroot >/dev/null 2>&1 \
+    && firewall-cmd --state >/dev/null 2>&1; then
     firewall-cmd --reload || _fw_warn "firewalld: reload failed"
   fi
   _fw_ok "firewalld configured (zone drop)"
