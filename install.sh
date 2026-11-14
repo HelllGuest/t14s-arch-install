@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# Globals are shared with lib/*.sh. Dynamic `_load_lib` uses source=/dev/null,
+# so shellcheck cannot see those reads/writes (SC2034). CI also excludes SC2034.
+# shellcheck disable=SC2034
 # install.sh — interactive hardened Arch Stage A for ThinkPad T14s Gen 3 AMD
 #               (21CQ/21CR) and ThinkPad P15 Gen 1 (20SU, Optimus NVIDIA).
 #

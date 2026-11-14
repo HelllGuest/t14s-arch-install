@@ -1031,7 +1031,7 @@ env T14S_IDENTITY_OVERRIDES=1 KEYMAP_DIR="$_idtmp/keymaps" \
 ' "$_idtmp/valid_keymap.sh" \
   || fail "stub localectl: us/dvo/extra pass / u. and ... must fail"
 
-command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning -e SC2015,SC2086,SC2162 "$INSTALL_SH" \
+command -v shellcheck >/dev/null 2>&1 && shellcheck -S warning -e SC2015,SC2086,SC2162,SC2034 "$INSTALL_SH" \
   || echo "NOTE: shellcheck skipped or warnings-only"
 
 # Live NONINTERACTIVE dry-run: catches set -e helper return bugs (no disk writes).
