@@ -363,21 +363,24 @@ sudo less /var/log/t14s-install.log  # full installer log
 ### Stage B (dotfiles)
 
 On the installed host, open your local `~/dotfiles` checkout (sibling repo), then
-either the modular TUI or full bootstrap.
+either the modular TUI or full bootstrap. Canonical howtos live in that repo’s
+README (`configure.sh`, firewalld/`lab-malware`, VM harness, git-setup, GNOME
+extension fetch).
 
 #### How to: `configure.sh` TUI
 
-Needs a real TTY (GNOME terminal). Backend: dialog → whiptail → plain. Modules
-**fail-fast** (one failure stops the run).
+Backend: dialog → whiptail → plain. Force with `CONFIGURE_UI=plain` on serial /
+CI / no TTY. Modules **fail-fast** (one failure stops the run).
 
 ```bash
 cd ~/dotfiles
 bash scripts/configure.sh
+CONFIGURE_UI=plain bash scripts/configure.sh   # headless / serial
 ```
 
 | Tag | Default | Notes |
 |-----|---------|-------|
-| `MIGRATE_FIREWALLD` | on | `virbr0`→`libvirt`, `virbr-malware`→`lab-malware` (DROP) |
+| `MIGRATE_FIREWALLD` | on | `virbr0`→`libvirt`; `virbr-malware`→`lab-malware` (iface + `192.168.200.0/24`; DROP) |
 | `APPLY_PROFILE` | off | hostname / DMI profile |
 | `SETUP_OLLAMA` | on if `HW_PROFILE`/DMI is P15 `20SU` | skipped on T14s with a message |
 | `SETUP_LABS` | off | `lab-triage` / `lab-re` / `lab-android` / `lab-web` |
@@ -388,10 +391,25 @@ bash scripts/configure.sh
 ```bash
 # or full Stage B (Caveman + Ponytail complementary hooks):
 ./install.sh
+# Optional: fold configure modules into install (fails hard on module error):
+# CONFIGURE=1 ./install.sh
+# CONFIGURE=1 CONFIGURE_UI=plain ./install.sh   # serial / no TTY
 
 # If virbr-malware still shows under libvirt/block (pre-lab-malware hosts):
 bash scripts/firewalld-migrate.sh
-firewall-cmd --get-active-zones   # expect virbr-malware under lab-malware only
+sudo firewall-cmd --get-active-zones
+sudo firewall-cmd --permanent --zone=lab-malware --list-all
+# expect: iface virbr-malware + source 192.168.200.0/24; target DROP
+```
+
+#### How to: Stage B on the Stage A qcow2
+
+After `bash tests/vm-run.sh` leaves `~/arch-vmtest/test-disk.qcow2`, from the
+dotfiles tree:
+
+```bash
+bash ~/dotfiles/scripts/vm-stageb-run.sh
+# RESULT=PASS | PASS_CONFIGURE | FAIL  (PASS_CONFIGURE = firewalld OK, install soft-fail)
 ```
 
 Lab wrappers after SETUP_LABS: `lab-triage` / `lab-re` / `lab-android` / `lab-web` /
