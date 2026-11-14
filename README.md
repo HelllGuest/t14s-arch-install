@@ -381,7 +381,7 @@ CONFIGURE_UI=plain bash scripts/configure.sh   # headless / serial
 
 | Tag | Default | Notes |
 |-----|---------|-------|
-| `MIGRATE_FIREWALLD` | on | `virbr0`→`libvirt`; `virbr-malware`→`lab-malware` (iface + `192.168.200.0/24`; DROP) |
+| `SETUP_FIREWALLD` | on | `virbr0`→`libvirt`; `virbr-malware`→`lab-malware` (iface + `192.168.200.0/24`; DROP) |
 | `APPLY_PROFILE` | off | hostname / DMI profile |
 | `SETUP_OLLAMA` | on if `HW_PROFILE`/DMI is P15 `20SU` | skipped on T14s with a message |
 | `SETUP_LABS` | off | `lab-triage` / `lab-re` / `lab-android` / `lab-web` |
@@ -397,7 +397,7 @@ CONFIGURE_UI=plain bash scripts/configure.sh   # headless / serial
 # CONFIGURE=1 CONFIGURE_UI=plain ./install.sh   # serial / no TTY
 
 # If virbr-malware still shows under libvirt/block (pre-lab-malware hosts):
-bash scripts/firewalld-migrate.sh
+bash scripts/firewalld-lab-zones.sh
 sudo firewall-cmd --get-active-zones
 sudo firewall-cmd --permanent --zone=lab-malware --list-all
 # expect: iface virbr-malware + source 192.168.200.0/24; target DROP
