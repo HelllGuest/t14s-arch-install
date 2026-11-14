@@ -26,7 +26,8 @@
 set -euo pipefail
 
 # ── library loader ──────────────────────────────────────────
-T14S_BASE_URL="${T14S_BASE_URL:-https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/main}"
+# Curl path: resolve one commit for install.sh + every lib/*.sh (no mixed tip).
+# Override: T14S_REF=<sha|branch|tag>, T14S_BASE_URL=…, or local T14S_LIB_DIR.
 T14S_LIB_DIR="${T14S_LIB_DIR:-}"
 if [[ -z $T14S_LIB_DIR ]]; then
   _t14s_self="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd || true)"
@@ -35,6 +36,19 @@ if [[ -z $T14S_LIB_DIR ]]; then
   fi
   unset -v _t14s_self
 fi
+if [[ -z ${T14S_BASE_URL:-} ]]; then
+  if [[ -z ${T14S_REF:-} ]]; then
+    T14S_REF="$(curl -fsSL -H 'Accept: application/vnd.github.sha' \
+      https://api.github.com/repos/HelllGuest/t14s-arch-install/commits/main 2>/dev/null || true)"
+    T14S_REF="${T14S_REF//$'\n'/}"
+    if [[ ! $T14S_REF =~ ^[0-9a-f]{40}$ ]]; then
+      printf 'ERR: could not resolve t14s-arch-install main SHA (set T14S_REF or T14S_BASE_URL)\n' >&2
+      exit 1
+    fi
+  fi
+  T14S_BASE_URL="https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/${T14S_REF}"
+fi
+export T14S_REF T14S_BASE_URL
 
 # Defaults needed before any sourced lib runs say()/die under set -u
 LOGGING=0
@@ -219,15 +233,6 @@ ANSWERS_KEYS=(
   BTRFS_COMPRESS ZRAM_SIZE REFLECTOR_COUNTRY SKIP_THINKPAD_HW
   EXTRA_PKGS_LIST
 )
-
-
-# Atomic: mktemp (always 0600) in the target dir, then rename over $f. A crash
-# never leaves a partial file, and a symlink at $f is replaced, not followed.
-
-# Secrets file (LUKS/USER/ROOT only). Never written by answers_save.
-# Format: KEY=value lines. Must be mode 0600 (u=rw only). Fail closed if mode unknown.
-
-
 
 if [[ -n $ANSWERS_IN ]]; then
   if answers_load "$ANSWERS_IN"; then

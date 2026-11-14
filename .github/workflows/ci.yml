@@ -22,6 +22,8 @@ jobs:
         run: |
           # SC2034: install.sh globals are shared with lib/*.sh via dynamic source
           shellcheck -S warning -e SC2015,SC2086,SC2162,SC2034 install.sh
+          # SC2154: color/globals assigned in install.sh before source
+          shellcheck -S warning -e SC2015,SC2086,SC2162,SC2034,SC1090,SC1091,SC2154 lib/*.sh
           shellcheck -S warning tests/host-check.sh tests/host-check.test.sh
       - name: TUI backend flags
         run: |

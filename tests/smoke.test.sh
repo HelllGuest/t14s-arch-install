@@ -52,6 +52,12 @@ grep -q 'pacman -Rns --noconfirm ufw' "$ROOT/lib/70-firewall.sh" \
 grep -q 'firewall-offline-cmd' "$INSTALL_SH" \
   || fail "chroot firewall must prefer firewall-offline-cmd"
 grep -q 'T14S_LIB_DIR' "$ROOT/install.sh" || fail "orchestrator must support T14S_LIB_DIR"
+grep -q "application/vnd.github.sha" "$ROOT/install.sh" \
+  || fail "curl path must resolve main→SHA (Accept: application/vnd.github.sha)"
+grep -qE 'T14S_REF:=69d4483' "$ROOT/install.sh" \
+  && fail "must not hardcode a stale T14S_REF commit pin" || true
+grep -q 'is-active --quiet firewalld' "$ROOT/lib/80-chroot-setup.sh" \
+  || fail "chroot check_firewalld must prefer is-active (sync with 70-firewall)"
 grep -q '70-firewall.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 70-firewall.sh"
 grep -q '80-chroot-setup.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 80-chroot-setup.sh"
 grep -q 't14s_base_packages' "$INSTALL_SH" || fail "pacstrap must use t14s_base_packages"

@@ -925,9 +925,10 @@ check_wifi() {
   nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
     || nmcli networking connectivity 2>/dev/null | grep -qi full
 }
-# firewalld status (user-callable; no root required for is-enabled).
+# firewalld status (user-callable; keep in sync with lib/70-firewall.sh).
 check_firewalld() {
-  systemctl is-enabled --quiet firewalld 2>/dev/null || systemctl is-active --quiet firewalld
+  systemctl is-active --quiet firewalld 2>/dev/null \
+    || systemctl is-enabled --quiet firewalld 2>/dev/null
 }
 check bluetooth systemctl is-active --quiet bluetooth
 check pipewire check_pipewire
