@@ -596,9 +596,10 @@ lib/30-hardware.sh         # DMI / ThinkPad helpers
 lib/40-disk.sh             # LUKS / Btrfs helpers
 lib/50-packages.sh         # package list stubs / helpers
 lib/60-boot.sh             # boot helpers
-lib/70-firewall.sh         # firewalld drop zone via firewall-offline-cmd; FW_* ports; mask ufw
+lib/70-firewall.sh         # firewalld drop zone via firewall-offline-cmd; FW_* ports; mask ufw;
+                           #   live reload only outside arch-chroot when firewall-cmd --state answers
 lib/80-chroot-setup.sh     # chroot body (deployed into the target)
-tests/                     # smoke + host-check
+tests/                     # smoke + host-check; vm-run.sh / vm-bootstrap.sh headless VM rehearsal
 ```
 
 Local work (no GitHub fetch of `lib/`):
@@ -607,6 +608,19 @@ Local work (no GitHub fetch of `lib/`):
 T14S_LIB_DIR=./lib bash install.sh
 # or: bash install.sh   # auto-detects sibling lib/ next to this script
 ```
+
+How `lib/` is loaded:
+
+| Case | Source of `lib/*.sh` | Network needed |
+|------|----------------------|----------------|
+| `lib/` next to `install.sh`, or `T14S_LIB_DIR` set | local files (chroot copies them too) | no |
+| curl one-liner (no local `lib/`) | `main` resolved **once** to a commit SHA via the GitHub API; every module comes from that SHA | yes |
+| `T14S_REF=<sha\|tag\|branch>` | that ref (wrappers in the dotfiles repo pin this way) | yes |
+| `T14S_BASE_URL=<url>` | that base URL as-is (e.g. a local `http.server` for VM rehearsal) | to that host |
+
+Resolving one SHA keeps `install.sh` and all modules from the same commit even
+if `main` moves mid-install (the chroot module is fetched ~20 min later). If the
+SHA cannot be resolved, the installer stops instead of mixing versions.
 
 ```bash
 bash -n install.sh
