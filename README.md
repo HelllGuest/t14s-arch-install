@@ -615,8 +615,8 @@ How `lib/` is loaded:
 |------|----------------------|----------------|
 | `lib/` next to `install.sh`, or `T14S_LIB_DIR` set | local files (chroot copies them too) | no |
 | curl one-liner (no local `lib/`) | `main` resolved **once** to a commit SHA via the GitHub API; every module comes from that SHA | yes |
-| `T14S_REF=<sha\|tag\|branch>` | that ref (wrappers in the dotfiles repo pin this way) | yes |
-| `T14S_BASE_URL=<url>` | that base URL as-is (e.g. a local `http.server` for VM rehearsal) | to that host |
+| `T14S_REF=<sha\|tag\|branch>` | that ref (manual override, e.g. pin a release) | yes |
+| `T14S_BASE_URL=<url>` | that base URL as-is: a local `http.server` for VM rehearsal, or the SHA-pinned raw URL the dotfiles wrappers pass after resolving `main` | to that host |
 
 Resolving one SHA keeps `install.sh` and all modules from the same commit even
 if `main` moves mid-install (the chroot module is fetched ~20 min later). If the
