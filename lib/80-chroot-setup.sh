@@ -127,7 +127,8 @@ stage 6 8 "initramfs and kernel cmdline"
 # initramfs (systemd + sd-encrypt for LUKS; optional plymouth)
 _HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt filesystems fsck)'
 if yn_on "${INSTALL_PLYMOUTH}"; then
-  _HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block sd-encrypt plymouth filesystems fsck)'
+  # plymouth before sd-encrypt so the LUKS prompt shows on the splash (ArchWiki).
+  _HOOKS='HOOKS=(base systemd autodetect microcode modconf kms keyboard sd-vconsole block plymouth sd-encrypt filesystems fsck)'
 fi
 sed -i "s/^HOOKS=.*/${_HOOKS}/" /etc/mkinitcpio.conf
 unset -v _HOOKS
@@ -137,7 +138,11 @@ grep -Eq '^HOOKS=.*sd-encrypt' /etc/mkinitcpio.conf \
 # kernel cmdline (shared by UKIs)
 mkdir -p /etc/kernel
 # BIOS Sleep = "Windows and Linux" pairs with mem_sleep_default=s2idle.
-_cmdline="rd.luks.name=${LUKS_UUID}=cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle apparmor=1 security=apparmor"
+# rd.luks.options=discard: pass TRIM through dm-crypt (fstrim.timer is enabled;
+# without it the SSD never sees discards). Trade-off: free-block layout is visible
+# to someone holding the disk; contents stay encrypted.
+# lsm= replaces the deprecated security=apparmor (ArchWiki AppArmor order).
+_cmdline="rd.luks.name=${LUKS_UUID}=cryptroot rd.luks.options=discard root=/dev/mapper/cryptroot rootflags=subvol=@ rw quiet loglevel=3 mem_sleep_default=s2idle lsm=landlock,lockdown,yama,integrity,apparmor,bpf"
 case ${HW_PROFILE:-t14s} in
   p15)
     _cmdline+=" intel_iommu=on nvidia_drm.modeset=1 rd.driver.blacklist=nouveau"
@@ -377,7 +382,9 @@ echo '-kernel.unprivileged_userns_clone = 1' > /etc/sysctl.d/99-userns.conf
   printf '%s\n' '--connection-timeout 3' '--download-timeout 5'
   printf '%s\n' '--save /etc/pacman.d/mirrorlist'
   if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
-    printf -- '--country %s\n' "$REFLECTOR_COUNTRY"
+    # reflector shlex-splits each line: quote so "United States" stays one arg
+    # (install.sh limits the value to letters, commas and spaces — no quotes).
+    printf -- "--country '%s'\n" "$REFLECTOR_COUNTRY"
   fi
 } > /etc/xdg/reflector/reflector.conf
 
@@ -911,7 +918,7 @@ fi
 if yn_on "${INSTALL_SELFTEST}"; then
   cat > /usr/local/bin/t14s-selftest <<'ST'
 #!/usr/bin/env bash
-# Quick Rembrandt laptop sanity after first boot.
+# Quick laptop sanity after first boot (T14s Gen 3 AMD / P15 Gen 1).
 set -euo pipefail
 ok=0; bad=0
 check() {
@@ -936,8 +943,13 @@ check wifi check_wifi
 check apparmor systemctl is-active --quiet apparmor
 check firewalld check_firewalld
 check mem_sleep grep -q '\[s2idle\]' /sys/power/mem_sleep
+# CPU vendor decides the expected cpufreq driver (T14s amd-pstate, P15 intel_pstate).
 if [[ -f /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver ]]; then
-  check amd_pstate grep -q '^amd-pstate' /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+  if grep -q AuthenticAMD /proc/cpuinfo; then
+    check amd_pstate grep -q '^amd-pstate' /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+  elif grep -q GenuineIntel /proc/cpuinfo; then
+    check intel_pstate grep -q '^intel_pstate' /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver
+  fi
 fi
 if [[ -f /sys/class/power_supply/BAT0/charge_control_start_threshold ]]; then
   check bat_start grep -qx '70' /sys/class/power_supply/BAT0/charge_control_start_threshold

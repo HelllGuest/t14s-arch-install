@@ -3,17 +3,47 @@
 # shellcheck shell=bash
 
 ui_geometry() {
-  ROWS=$(tput lines 2>/dev/null) || ROWS=24
-  COLS=$(tput cols 2>/dev/null) || COLS=80
-  [[ $ROWS =~ ^[0-9]+$ ]] || ROWS=24
-  [[ $COLS =~ ^[0-9]+$ ]] || COLS=80
-  H=$(( ROWS > 28 ? 22 : ROWS - 6 )); (( H < 12 )) && H=12
-  W=$(( COLS > 92 ? 84 : COLS - 8 )); (( W < 56 )) && W=56
+  local sz=""
+  # Ask the terminal itself: tput falls back to 24x80 once stdin, stdout and
+  # stderr are all redirected (curl | bash after start_log sends output to $LOG).
+  sz=$(stty size 2>/dev/null </dev/tty) || sz=""
+  ROWS=${sz% *} COLS=${sz#* }
+  if ! [[ $ROWS =~ ^[1-9][0-9]*$ && $COLS =~ ^[1-9][0-9]*$ ]]; then
+    ROWS=$(tput lines 2>/dev/null) || ROWS=24
+    COLS=$(tput cols 2>/dev/null) || COLS=80
+  fi
+  [[ $ROWS =~ ^[1-9][0-9]*$ ]] || ROWS=24
+  [[ $COLS =~ ^[1-9][0-9]*$ ]] || COLS=80
+  # Lists, logs and progress scale with the console: small terminals use almost
+  # all of it; big fbcon consoles (T14s 2.8K ~180x56, WUXGA ~240x75) get ~2/3,
+  # capped so boxes stay readable instead of a fixed 84x22 island.
+  if (( ROWS > 28 )); then
+    H=$(( ROWS * 2 / 3 )); (( H < 22 )) && H=22; (( H > 44 )) && H=44
+  else
+    H=$(( ROWS - 6 ))
+  fi
+  (( H < 12 )) && H=12
+  if (( COLS > 92 )); then
+    W=$(( COLS * 2 / 3 )); (( W < 84 )) && W=84; (( W > 120 )) && W=120
+  else
+    W=$(( COLS - 8 ))
+  fi
+  (( W < 56 )) && W=56
+  # Never larger than the screen (minimums above can exceed a tiny console).
+  (( H > ROWS - 2 )) && H=$(( ROWS - 2 ))
+  (( W > COLS - 2 )) && W=$(( COLS - 2 ))
+  (( H < 1 )) && H=1
+  (( W < 1 )) && W=1
   LH=$(( H - 8 )); (( LH < 4 )) && LH=4
   # Compact height for short severity message boxes (still readable).
-  MH=$(( H > 16 ? 14 : H )); (( MH < 10 )) && MH=10
+  MH=$(( H > 16 ? 14 : H )); (( MH < 10 && H >= 10 )) && MH=10
   # Fold width for prose (~76 col modern CLI / Primer guideline).
   FW=$(( W - 4 )); (( FW > 76 )) && FW=76; (( FW < 40 )) && FW=40
+  # Message boxes may use the whole screen bar backtitle + shadow (H keeps
+  # menus compact; a msgbox capped at H hid the manual layout's last rows).
+  XH=$(( ROWS - 4 )); (( XH < H )) && XH=$H
+  # Prose boxes (msg/yesno/input/info) hug the fold width, not the wide W.
+  MW=$(( FW + 8 )); (( MW > W )) && MW=$W
   return 0
 }
 ui_geometry
@@ -251,15 +281,18 @@ tui() {
 # Height for a message body: MH floor, H ceiling, scales with line count.
 msg_height() {
   local text=$1 lines need
-  lines=$(printf '%s' "$text" | wc -l)
+  # Visible lines: wc -l counts newlines, so add the final unterminated line.
+  # whiptail/dialog need text + 6 rows (borders, padding, button row).
+  lines=$(printf '%s\n' "$text" | wc -l)
   need=$(( lines + 6 ))
   (( need < MH )) && need=$MH
-  (( need > H )) && need=$H
+  (( need > ${XH:-$H} )) && need=${XH:-$H}
   printf '%s' "$need"
 }
 
 die() { # message [exit-code]
   local msg=${1:-failed} rc=${2:-1} was_logging=$LOGGING
+  T14S_DIED=1
   trap - ERR
   # After start_log, stderr is the log file: record the error there, then
   # restore the console so the operator actually sees why it stopped.
@@ -286,6 +319,22 @@ Full log: $LOG" || true
   printf 'full log: %s\n' "$LOG" >&2
   cleanup_ui
   exit "$rc"
+}
+
+# EXIT backstop. The ERR trap is not inherited by functions (no set -E: that
+# would also fire inside every $(…)), so a set -e exit from a failing command
+# inside a helper (mkfs/mount in do_btrfs_and_mount, …) never reaches die().
+# Report it like die() instead of closing the TUI with the reason only in $LOG.
+on_exit() {
+  local rc=$1
+  if (( rc != 0 && ! ${T14S_DIED:-0} )); then
+    # Operator interrupt (INT/TERM): report and exit, no dialog to dismiss.
+    if (( rc == 130 || rc == 143 )); then
+      NONINTERACTIVE=1 die "interrupted (signal $(( rc - 128 )))" "$rc"
+    fi
+    die "stopped unexpectedly (exit $rc): a command inside a helper failed — see the log" "$rc"
+  fi
+  cleanup_ui
 }
 # ERR/EXIT traps are installed by install.sh after globals (not here).
 
@@ -378,7 +427,11 @@ ui_msg() {
   TUI_NEWT=$newt
   TUI_DIALOGRC=$drc
   _tui_btns msg
-  tui "${_btns[@]}" --msgbox "$show" "$h" "$W" || true
+  # whiptail cuts text taller than the box unless --scrolltext (REVIEW and the
+  # finish screen are 30+ lines; an 80x24 console fits ~16).
+  local scroll=()
+  [[ $UI == whiptail ]] && scroll=(--scrolltext)
+  tui "${scroll[@]}" "${_btns[@]}" --msgbox "$show" "$h" "$MW" || true
   TUI_TITLE=""
   TUI_NEWT=""
   TUI_DIALOGRC=""
@@ -491,9 +544,10 @@ ui_yesno() { # text [default] [severity]
     return
   fi
   local extra=(); [[ $def == no ]] && extra=(--defaultno)
+  [[ $UI == whiptail ]] && extra+=(--scrolltext)
   _tui_btns "$btn_role"
   local rc=0
-  tui "${extra[@]}" "${_btns[@]}" --yesno "$folded" "$(msg_height "$folded")" "$W" || rc=$?
+  tui "${extra[@]}" "${_btns[@]}" --yesno "$folded" "$(msg_height "$folded")" "$MW" || rc=$?
   TUI_TITLE=$old_title; TUI_NEWT=$old_newt; TUI_DIALOGRC=$old_drc
   return "$rc"
 }
@@ -501,13 +555,13 @@ ui_yesno() { # text [default] [severity]
 ui_input() { # prompt [default]
   if [[ $UI == plain ]]; then ask "$1: " "${2:-}"; return; fi
   _tui_btns nav
-  tui "${_btns[@]}" --inputbox "$1" 10 "$W" "${2:-}"
+  tui "${_btns[@]}" --inputbox "$1" 10 "$MW" "${2:-}"
 }
 
 ui_password() { # prompt
   if [[ $UI == plain ]]; then ask_secret "$1: "; return; fi
   _tui_btns nav
-  tui "${_btns[@]}" --passwordbox "$1" 10 "$W"
+  tui "${_btns[@]}" --passwordbox "$1" 10 "$MW"
 }
 
 # ui_menu prompt tag description [tag description ...]  -> tag on stdout
@@ -675,7 +729,7 @@ $TUI_HINT_CHECK" \
   done
 }
 
-ui_infobox() { [[ $UI == plain ]] && return 0; tui --infobox "$1" "$H" "$W"; }
+ui_infobox() { [[ $UI == plain ]] && return 0; tui --infobox "$1" "$(msg_height "$1")" "$MW"; }
 step() { say "$*"; ui_infobox "$*"; }
 
 # ── logging around the destructive phase ────────────────────

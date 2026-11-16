@@ -120,18 +120,37 @@ disk_type() { lsblk -dno TYPE "$1" 2>/dev/null; }
 size_mb()   { local b; b="$(lsblk -bdnro SIZE "$1" 2>/dev/null)"; printf '%s' "$(( ${b:-0} / 1048576 ))"; }
 part_fs()   { lsblk -no FSTYPE "$1" 2>/dev/null | head -1; }
 
+# lsblk_rows DEV COL... -> one line per device (DEV first, then children), the
+# requested columns joined by $'\x1f'. Read with: IFS=$'\x1f' read -r a b …
+# -P keeps spaces in values (-r prints "EFI\x20System"), and a non-whitespace
+# separator keeps empty fields (an empty FSTYPE no longer shifts later columns).
+lsblk_rows() {
+  local dev=$1 line col out re cols; shift
+  cols=$(IFS=,; printf '%s' "$*")
+  while IFS= read -r line; do
+    out=""
+    for col in "$@"; do
+      re="(^| )${col}=\"([^\"]*)\""
+      [[ $line =~ $re ]] && out+=${BASH_REMATCH[2]}
+      out+=$'\x1f'
+    done
+    printf '%s\n' "${out%$'\x1f'}"
+  done < <(lsblk -pnP -o "$cols" "$dev" 2>/dev/null)
+}
+
 # build_part_menu ARRAY DISK [filter] [exclude]
 #   filter = any | vfat; fills ARRAY with tag/description pairs for ui_menu.
 build_part_menu() {
   local -n _out=$1
   local _disk=$2 _filter=${3:-any} _excl=${4:-} typ p sz fs tt
   _out=()
-  while read -r typ p sz fs tt; do
+  while IFS=$'\x1f' read -r typ p sz fs tt; do
     [[ $typ == part ]] || continue
     [[ -n $_excl && $p == "$_excl" ]] && continue
     [[ $_filter == vfat && $fs != vfat ]] && continue
-    _out+=("$p" "${sz}  ${fs:-empty}  ${tt:-}")
-  done < <(lsblk -prno TYPE,PATH,SIZE,FSTYPE,PARTTYPENAME "$_disk" 2>/dev/null)
+    # Fixed-width size/fs columns so the type names line up.
+    _out+=("$p" "$(printf '%-7s %-11s %s' "$sz" "${fs:-empty}" "${tt:-}")")
+  done < <(lsblk_rows "$_disk" TYPE PATH SIZE FSTYPE PARTTYPENAME)
   _out+=(manual "type a partition path")
 }
 

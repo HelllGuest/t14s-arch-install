@@ -970,7 +970,7 @@ PY
 grep -q 'build_part_menu' "$INSTALL_SH" || fail "partition selector helper missing"
 grep -q 'pick_part' "$INSTALL_SH" || fail "partition picker missing"
 grep -q 'EFI system partition size' "$INSTALL_SH" || fail "ESP size must be selectable"
-grep -q 'lsblk -prno TYPE,PATH' "$INSTALL_SH" || fail "partition list must filter to type=part"
+grep -q 'lsblk_rows "\$_disk" TYPE PATH' "$INSTALL_SH" || fail "partition list must filter to type=part"
 grep -q 'root_mb < 8192' "$INSTALL_SH" || fail "must warn on tiny root"
 
 grep -q 'HelllGuest/t14s-arch-install/main/install.sh' "$INSTALL_SH" \
@@ -1184,7 +1184,7 @@ PY
 _pick="$(awk '/^pick_part\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$INSTALL_SH")"
 grep -q 'part_on_disk "\$ans" "\$disk"' <<<"$_pick" \
   || fail "pick_part must reject manual partitions on another disk"
-grep -qF '[[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]]' "$INSTALL_SH" \
+grep -qF '[[ -d /run/archiso ]] || (( ALLOW_NON_ISO ))' "$INSTALL_SH" \
   || fail "preflight must require /run/archiso unless T14S_ALLOW_NON_ISO=1"
 grep -q 'iflag=count_bytes count="\$size"' "$INSTALL_SH" \
   || fail "LUKS wipe must bound dd to the device size"
@@ -1211,6 +1211,8 @@ grep -q 'plain | dialog | whiptail) UI=\$T14S_UI' "$INSTALL_SH" \
   || fail "T14S_UI must be limited to plain|dialog|whiptail"
 grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$INSTALL_SH" \
   || fail "ERR trap must report the failed command"
+grep -qF "trap 'on_exit \$?' EXIT" "$ORCH_SH" \
+  || fail "EXIT trap must route through on_exit (backstop for failures inside helpers)"
 
 # T14S_DRYRUN: unknown values abort (never a silent real install) and are
 # never evaluated as arithmetic (no $(…) execution).
@@ -1279,7 +1281,7 @@ grep -q 'firmware fallback loader) is replaced' "$INSTALL_SH" \
 # NONINTERACTIVE must never block on a keypress or msgbox (VM test: the final
 # "INSTALL COMPLETE" waited for [enter] forever with the target unmounted).
 _fns=""
-for _f in ui_fold ui_msg die start_log stop_log; do
+for _f in ui_fold ui_msg die start_log stop_log on_exit; do
   _body="$(awk -v f="$_f" '$0 ~ "^"f"\\(\\) *\\{" {p=1} p{print} p&&/^}/{exit}' "$INSTALL_SH")"
   [[ -n $_body ]] || fail "could not extract $_f"
   _fns+="$_body"$'\n'
@@ -1318,5 +1320,180 @@ grep -q 'check_firewalld' <<<"$_st" \
   || fail "selftest must check firewalld"
 grep -qE 'systemctl is-(enabled|active) --quiet firewalld' <<<"$_st" \
   || fail "selftest firewalld check must use systemctl"
+
+# A set -e exit from inside a helper skips the (non-inherited) ERR trap; on_exit
+# must still report it. die() must not be reported twice; rc 0 stays silent.
+_tmp="$(mktemp -d)"
+_run_exit() {
+  bash -c '
+    eval "$1"
+    cleanup_ui() { :; }; ui_critical() { echo CRIT; }; tui() { echo TUI; }
+    UI=plain NONINTERACTIVE=1 LOGGING=0 LOG=$2 cR= c0= H=20 W=70 T14S_DIED=0
+    set -euo pipefail
+    trap "die \"failed at line \$LINENO\" \$?" ERR
+    trap "on_exit \$?" EXIT
+    helper() { false; echo not-reached; }
+    case $3 in
+      helper) start_log; helper ;;
+      die) die "explicit-die" 4 ;;
+      ok) : ;;
+    esac
+  ' _ "$_fns" "$_tmp/log" "$1" 2>&1 >/dev/null
+}
+_err="$(_run_exit helper)" && fail "helper failure must exit non-zero"
+grep -q 'ERR stopped unexpectedly (exit 1)' <<<"$_err" \
+  || fail "on_exit must report a failure inside a helper on the console: $_err"
+grep -q 'ERR stopped unexpectedly' "$_tmp/log" || fail "on_exit report must also reach the log"
+_err="$(_run_exit die)" && fail "die must exit non-zero"
+[[ $(grep -c '^ERR' <<<"$_err") -eq 1 ]] || fail "die must not be reported twice by on_exit: $_err"
+[[ -z $(_run_exit ok) ]] || fail "clean exit must stay silent"
+rm -rf "$_tmp"
+unset -f _run_exit
+
+# TRIM through LUKS, lsm= (not deprecated security=), plymouth before sd-encrypt.
+grep -q 'rd.luks.options=discard' "$INSTALL_SH" || fail "cmdline must pass discards through LUKS (fstrim.timer)"
+grep -q 'lsm=landlock,lockdown,yama,integrity,apparmor,bpf' "$INSTALL_SH" \
+  || fail "cmdline must enable AppArmor via lsm="
+! grep -v '^[[:space:]]*#' "$ROOT/lib/80-chroot-setup.sh" | grep -q 'security=apparmor' || fail "security= is deprecated; use lsm="
+while IFS= read -r _h; do
+  if [[ $_h == *plymouth* ]]; then
+    [[ ${_h%%plymouth*} != *sd-encrypt* ]] || fail "plymouth hook must precede sd-encrypt: $_h"
+  fi
+done < <(grep -o "HOOKS=([^)]*)" "$ROOT/lib/80-chroot-setup.sh")
+grep -q 'HOOKS=([^)]*plymouth sd-encrypt' "$ROOT/lib/80-chroot-setup.sh" \
+  || fail "missing plymouth HOOKS variant"
+
+# Avahi needs the mdns service in the drop zone (replies are not conntracked).
+_fw="$(awk '/^configure_firewalld\(\) \{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/70-firewall.sh")"
+grep -q 'INSTALL_AVAHI' <<<"$_fw" && grep -q -- '--add-service=mdns' <<<"$_fw" \
+  || fail "configure_firewalld must allow mdns when INSTALL_AVAHI=Y"
+_tmp="$(mktemp -d)"
+mkdir -p "$_tmp/bin" "$_tmp/etc"
+printf '#!/bin/sh\necho "$@" >>"%s/calls"\n' "$_tmp" >"$_tmp/bin/firewall-offline-cmd"
+for _c in systemctl systemd-detect-virt firewall-cmd pacman; do printf '#!/bin/sh\nexit 1\n' >"$_tmp/bin/$_c"; done
+chmod +x "$_tmp"/bin/*
+_fwrun() {
+  PATH="$_tmp/bin:$PATH" INSTALL_AVAHI=$1 FIREWALLD_CONF="$_tmp/etc/firewalld/firewalld.conf" bash -c '
+    yn_on() { local v=${1,,}; [[ $v == y || $v == yes || $v == on || $v == 1 ]]; }
+    source "$1"
+    configure_firewalld >/dev/null' _ "$ROOT/lib/70-firewall.sh"
+}
+_fwrun Y; grep -qx -- '--add-service=mdns' "$_tmp/calls" || fail "INSTALL_AVAHI=Y must add mdns"
+grep -qx 'DefaultZone=drop' "$_tmp/etc/firewalld/firewalld.conf" || fail "firewalld.conf must be seeded with DefaultZone=drop"
+printf '%s\n' 'DefaultZone=public' 'FirewallBackend=iptables' >"$_tmp/etc/firewalld/firewalld.conf"
+rm -f "$_tmp/calls"; _fwrun N
+! grep -qs -- 'mdns' "$_tmp/calls" || fail "INSTALL_AVAHI=N must not open mdns"
+[[ $(cat "$_tmp/etc/firewalld/firewalld.conf") == $'DefaultZone=drop\nFirewallBackend=nftables' ]] \
+  || fail "existing firewalld.conf must be rewritten to drop + nftables"
+rm -rf "$_tmp"
+unset -f _fwrun
+
+# P15 (Intel) must not get AMD-only post-boot checks.
+_st="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<.ST.$/{f=1;next} f&&/^ST$/{exit} f' "$INSTALL_SH")"
+grep -q 'check intel_pstate' <<<"$_st" || fail "selftest must check intel_pstate on Intel (P15)"
+grep -q 'GenuineIntel' <<<"$_st" || fail "selftest cpufreq check must branch on CPU vendor"
+grep -q 'CMDLINE_HINT="grep -E .intel_iommu|nvidia_drm' "$ORCH_SH" \
+  || fail "P15 finish screen must check intel_iommu/nvidia_drm, not amd_*"
+! grep -q 'Verify after boot: lscpu | grep -i ryzen' "$ORCH_SH" \
+  || fail "finish screen CPU hint must be profile-aware"
+
+# Interrupt (INT/TERM) reports and exits without a dialog to dismiss.
+_tmp="$(mktemp -d)"
+_err="$(bash -c '
+  eval "$1"
+  cleanup_ui() { :; }; ui_critical() { echo CRIT >&2; }; tui() { echo TUI >&2; }
+  UI=dialog NONINTERACTIVE=0 LOGGING=0 LOG=$2 cR= c0= H=20 W=70 T14S_DIED=0
+  trap "on_exit \$?" EXIT
+  exit 130
+' _ "$_fns" "$_tmp/log" 2>&1 >/dev/null)" && fail "interrupt must exit non-zero"
+grep -q 'ERR interrupted (signal 2)' <<<"$_err" || fail "interrupt must be reported: $_err"
+! grep -q CRIT <<<"$_err" || fail "interrupt must not open a dialog"
+rm -rf "$_tmp"
+
+# reflector.conf: shlex-split per line, so a spaced country must stay one arg.
+_rf="$(awk '/^# reflector mirrors/{f=1;next} f{print} f&&/^} > \/etc\/xdg\/reflector\/reflector.conf$/{exit}' "$ROOT/lib/80-chroot-setup.sh")"
+[[ -n $_rf ]] || fail "could not extract reflector.conf writer"
+_rfout="$(REFLECTOR_COUNTRY='United States,DE' bash -c "${_rf%>*}")"
+python3 -c 'import shlex,sys; a=[t for l in sys.stdin for t in shlex.split(l, comments=True)]; i=a.index("--country"); sys.exit(0 if a[i+1]=="United States,DE" else 1)' <<<"$_rfout" \
+  || fail "reflector.conf --country must survive shlex splitting: $_rfout"
+
+# Minor: one install log; ESP size in the step text; env toggles accept y/yes/on.
+[[ $(grep -c '^LOG="\$(mktemp' "$ORCH_SH") -eq 1 ]] || fail "install.sh must create the log file once"
+! grep -q '2G ESP + LUKS' "$ORCH_SH" || fail "partition step text must use ESP_MB"
+grep -q '_env_on "${T14S_ALLOW_NON_ISO:-0}"' "$ORCH_SH" || fail "T14S_ALLOW_NON_ISO must accept y/yes/on"
+grep -q '_env_on "${T14S_POST_HOOK_I_UNDERSTAND:-0}"' "$ORCH_SH" \
+  || fail "T14S_POST_HOOK_I_UNDERSTAND must accept y/yes/on"
+
+# TUI geometry scales with the real console (pty via script(1)) and never
+# exceeds it; size comes from /dev/tty even with every fd redirected.
+if command -v script >/dev/null 2>&1; then
+  _geo() { # rows cols [redirect] -> "H W LH MH MW"
+    local cmd='source "$1"; ui_geometry; echo "GEO $H $W $LH $MH $MW"'
+    [[ ${3:-} == redirect ]] && cmd='source "$1"; { ui_geometry; echo "GEO $H $W $LH $MH $MW" >&3; } 3>&1 </dev/null >/dev/null 2>&1'
+    script -qec "stty rows $1 cols $2; bash -c '$cmd' _ '$ROOT/lib/10-ui.sh'" /dev/null 2>/dev/null \
+      | tr -d '\r' | sed -n 's/^GEO //p'
+  }
+  [[ $(_geo 24 80) == "18 72 10 14 72" ]] || fail "80x24 geometry: $(_geo 24 80)"
+  [[ $(_geo 37 120) == "24 84 16 14 84" ]] || fail "120x37 geometry: $(_geo 37 120)"
+  [[ $(_geo 56 180) == "37 120 29 14 84" ]] || fail "T14s 2.8K 180x56 geometry: $(_geo 56 180)"
+  [[ $(_geo 75 240) == "44 120 36 14 84" ]] || fail "WUXGA 240x75 geometry: $(_geo 75 240)"
+  [[ $(_geo 56 180 redirect) == "37 120 29 14 84" ]] \
+    || fail "geometry must read /dev/tty when all fds are redirected: $(_geo 56 180 redirect)"
+  read -r _gh _gw _ <<<"$(_geo 10 40)"
+  (( _gh <= 8 && _gw <= 38 )) || fail "tiny 40x10 console: box must fit the screen ($_gh x $_gw)"
+  unset -f _geo; unset -v _gh _gw
+else
+  echo "skip TUI geometry pty checks (no script(1))"
+fi
+# whiptail cuts long msgbox/yesno text unless --scrolltext (REVIEW is 30+ lines).
+_um="$(awk '/^ui_msg\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh")"
+grep -q 'scroll=(--scrolltext)' <<<"$_um" || fail "whiptail msgbox must use --scrolltext"
+_uy="$(awk '/^ui_yesno\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh")"
+grep -q 'extra+=(--scrolltext)' <<<"$_uy" || fail "whiptail yesno must use --scrolltext"
+unset -v _um _uy
+
+# Partition/disk menus read lsblk -P: spaces stay readable (no "EFI\x20System")
+# and an empty FSTYPE must not shift PARTTYPENAME into the fs column.
+_tmp="$(mktemp -d)"
+mkdir -p "$_tmp/bin"
+cat >"$_tmp/bin/lsblk" <<'LSBLK'
+#!/bin/sh
+# Pairs output only for -P; anything else gets lsblk -r style (escaped spaces).
+if [ "$1" != -pnP ]; then echo 'part /dev/nvme0n1p1 2.8G vfat EFI\x20System'; exit 0; fi
+case "$*" in
+  *TYPE,PATH,SIZE,FSTYPE,PARTTYPENAME*)
+    echo 'TYPE="disk" PATH="/dev/nvme0n1" SIZE="953.9G" FSTYPE="" PARTTYPENAME=""'
+    echo 'TYPE="part" PATH="/dev/nvme0n1p1" SIZE="2.8G" FSTYPE="vfat" PARTTYPENAME="EFI System"'
+    echo 'TYPE="part" PATH="/dev/nvme0n1p2" SIZE="16M" FSTYPE="" PARTTYPENAME="Microsoft reserved"'
+    echo 'TYPE="part" PATH="/dev/nvme0n1p5" SIZE="805.4G" FSTYPE="crypto_LUKS" PARTTYPENAME="Linux filesystem"'
+    echo 'TYPE="crypt" PATH="/dev/mapper/cryptroot" SIZE="805.4G" FSTYPE="btrfs" PARTTYPENAME=""' ;;
+  *SIZE,MODEL*) echo 'SIZE="953.9G" MODEL="SAMSUNG MZVL21T0HCLR-00BL7"' ;;
+esac
+LSBLK
+chmod +x "$_tmp/bin/lsblk"
+_menu="$(PATH="$_tmp/bin:$PATH" bash -c '
+  source "$1"; arr=(); build_part_menu arr /dev/nvme0n1
+  printf "%s\n" "${arr[@]}"' _ "$ROOT/lib/00-common.sh" | paste -d'|' - -)"
+grep -qxF '/dev/nvme0n1p1|2.8G    vfat        EFI System' <<<"$_menu" || fail "partition menu row p1: $_menu"
+grep -qxF '/dev/nvme0n1p2|16M     empty       Microsoft reserved' <<<"$_menu" \
+  || fail "empty FSTYPE must stay empty, not take PARTTYPENAME: $_menu"
+! grep -q 'x20\|cryptroot\|953.9G' <<<"$_menu" || fail "menu must list partitions only, unescaped: $_menu"
+_model="$(PATH="$_tmp/bin:$PATH" bash -c 'source "$1"; IFS=$'"'"'\x1f'"'"' read -r s m < <(lsblk_rows /dev/nvme0n1 SIZE MODEL); echo "$s|$m"' _ "$ROOT/lib/00-common.sh")"
+[[ $_model == '953.9G|SAMSUNG MZVL21T0HCLR-00BL7' ]] || fail "disk model must keep spaces: $_model"
+! grep -q 'dnro SIZE,MODEL\|prno TYPE,PATH' "$ORCH_SH" "$ROOT/lib/00-common.sh" || fail "menus must not use lsblk -r (escapes spaces)"
+rm -rf "$_tmp"; unset -v _menu _model
+
+# msg_height counts the last (unterminated) line: 2 lines + 6 rows overhead.
+[[ $(bash -c 'source "$1"; MH=1 H=50 XH=50; msg_height "a
+b"' _ "$ROOT/lib/10-ui.sh") == 8 ]] || fail "msg_height must count the final line"
+
+# The erase / manual-layout screens must fit an 80x24 console (message box
+# limit 20 rows = 14 text rows): badge 2 + intro + table (header, disk, parts).
+for _scr in 'ui_critical "AUTO mode ERASES' 'ui_info "Manual partitioning on'; do
+  _n="$(awk -v s="$_scr" 'index($0, s){f=1} f{n++} f&&/^\$\(lsblk -o NAME/{print n; exit}' "$ORCH_SH")"
+  [[ -n $_n ]] || fail "could not find screen: $_scr"
+  (( _n - 1 <= 4 )) || fail "screen '$_scr' has $(( _n - 1 )) intro lines; keep ≤4 so a 5-partition table fits 80x24"
+done
+unset -v _scr _n
 
 echo "PASS: smoke.test.sh"

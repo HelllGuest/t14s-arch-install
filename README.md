@@ -65,8 +65,11 @@ Pacstrapped into the new root every run:
 * LUKS2 on root; Btrfs subvolumes
   `@` `@home` `@snapshots` `@var_log` `@var_cache` `@tmp` (`@tmp` = nodatacow)
 * Mount options: `compress=` from wizard (`zstd3` default)
-* Kernel cmdline: `rd.luks.name=…`, `amd_iommu=on`, `amd_pstate=active`,
-  `mem_sleep_default=s2idle`, AppArmor
+* Kernel cmdline: `rd.luks.name=…`, `rd.luks.options=discard` (TRIM through
+  LUKS for `fstrim.timer`; free-block layout becomes visible, contents stay
+  encrypted), `amd_iommu=on`, `amd_pstate=active` (P15: `intel_iommu=on`,
+  `nvidia_drm.modeset=1`), `mem_sleep_default=s2idle`,
+  `lsm=landlock,lockdown,yama,integrity,apparmor,bpf` (AppArmor)
 * Sleep drop-in (`/etc/systemd/sleep.conf.d/s2idle.conf`): enforces `s2idle`
 * systemd-boot; UKIs under `/boot/EFI/Linux/`
 * Sysctl hardening (`99-security.conf` + Flatpak userns for hardened)
@@ -99,8 +102,8 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 | multilib | Enable `[multilib]` (not `-testing`) | 32-bit libs (Steam, Wine) |
 | yay | `yay-bin` built as your user, installed with `pacman -U` (no sudoers change) | AUR helper |
 | `linux` stable UKI | `linux` + headers + third UKI pair | Optional bleeding kernel |
-| Plymouth | `plymouth` + mkinitcpio hook + `splash` | Optional splash |
-| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / firewalld / `s2idle` / `amd_pstate` / `BAT0` 70–80 / touchpad wakeup / compiled GDM dconf check |
+| Plymouth | `plymouth` + mkinitcpio hook (before `sd-encrypt`, so the LUKS prompt shows on the splash) + `splash` | Optional splash |
+| Self-test | `/usr/local/bin/t14s-selftest` | BT / audio / wifi / AppArmor / firewalld / `s2idle` / cpufreq driver (`amd-pstate` or `intel_pstate`) / `BAT0` 70–80 / touchpad wakeup / compiled GDM dconf check |
 | Clean ESP Arch | Remove old Arch UKIs, `arch*.conf` entries, `EFI/arch` | Reinstall hygiene (default on). Kernels/ucode always cleared. Skips other vendors’ `EFI/*` dirs; does not delete `linux-*.conf` (may be non-Arch) |
 | Chrome helper | `~/install-chrome-flatpak.sh` | Chrome needs post-boot Flatpak userns |
 
@@ -120,7 +123,7 @@ Defaults come from preset **`gnome`** / **`dev`** / **`minimal`**, then checklis
 
 | Toggle | Adds |
 | ------ | ---- |
-| avahi | `avahi` `nss-mdns` + `nsswitch` mdns |
+| avahi | `avahi` `nss-mdns` + `nsswitch` mdns + firewalld `mdns` service (drop zone otherwise discards replies) |
 | wireguard | `wireguard-tools` |
 | tailscale | `tailscale` (enabled) |
 | fail2ban | `fail2ban` + sshd jail |
@@ -189,6 +192,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/HelllGuest/t14s-arch-install
 
 Prefer `bash <(curl …)` so menus keep a real TTY.
 UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whiptail|plain` (any other value falls back to plain).
+Box size follows the console (read from `/dev/tty`): menus, logs and progress use about 2/3 of a large console (up to 120x44), prose boxes stay about 84 columns wide, and nothing is drawn larger than the screen. Long screens (Review, finish) get `--scrolltext` under whiptail, which otherwise cuts them off.
 
 ### Screens
 
@@ -339,7 +343,9 @@ reboot   # remove the ISO
 lscpu | grep -i ryzen
 cat /sys/power/mem_sleep          # expect [s2idle]
 grep -E 'amd_iommu|amd_pstate' /proc/cmdline
+lsblk -D /dev/mapper/cryptroot    # DISC-GRAN non-zero = TRIM reaches the SSD
 # P15 (20SU): confirm Optimus + optional ollama-cuda
+#   grep -E 'intel_iommu|nvidia_drm' /proc/cmdline
 #   lspci -nnk -d 10de: | grep -A2 'Kernel driver'
 #   systemctl status ollama   # if INSTALL_OLLAMA=Y → 127.0.0.1:11434
 # ThinkPad only — missing on a VM is normal

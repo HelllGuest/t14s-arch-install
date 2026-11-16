@@ -102,6 +102,8 @@ if _env_on "${T14S_NONINTERACTIVE:-0}"; then NONINTERACTIVE=1; else NONINTERACTI
 ANSWERS_IN=${T14S_ANSWERS:-}
 PASS_FILE=${T14S_PASS_FILE:-}
 if _env_on "${T14S_I_WILL_ERASE:-0}"; then WILL_ERASE=1; else WILL_ERASE=0; fi
+if _env_on "${T14S_ALLOW_NON_ISO:-0}"; then ALLOW_NON_ISO=1; else ALLOW_NON_ISO=0; fi
+if _env_on "${T14S_POST_HOOK_I_UNDERSTAND:-0}"; then POST_HOOK_CONSENT=1; else POST_HOOK_CONSENT=0; fi
 unset -f _env_on
 # Never accept LUKS/user/root passwords from ambient environment (/proc leak).
 # Unattended secrets come only from T14S_PASS_FILE; interactive uses ui_password.
@@ -112,8 +114,6 @@ PRESET=gnome
 POST_HOOK_URL=""
 EXTRA_PKGS=()
 EXTRA_PKGS_LIST=""
-LOG="$(mktemp /tmp/t14s-install.XXXXXX.log)"
-LOGGING=0
 DIALOG_RC=""
 DIALOG_RC_DIR=""
 DIALOG_RC_INFO="" DIALOG_RC_WARN="" DIALOG_RC_ERROR="" DIALOG_RC_CRITICAL="" DIALOG_RC_OK=""
@@ -133,14 +133,15 @@ TUI_HINT_CHECK='Space=toggle · Enter=Next · Esc=Abort · [log]/[help]'
 
 
 trap 'die "failed at line $LINENO (exit $?): $BASH_COMMAND" $?' ERR
-trap 'cleanup_ui' EXIT
+T14S_DIED=0
+trap 'on_exit $?' EXIT
 
 # ── 0. preflight ────────────────────────────────────────────
 if (( ! DRYRUN )); then
   [[ $EUID -eq 0 ]] || die "run as root (from the Arch ISO)"
   [[ -d /sys/firmware/efi/efivars ]] || die "not booted in UEFI mode — enable UEFI and reboot the ISO"
   # The installer assumes a disposable live environment (/mnt, cryptroot mapper).
-  [[ -d /run/archiso || ${T14S_ALLOW_NON_ISO:-0} == 1 ]] \
+  [[ -d /run/archiso ]] || (( ALLOW_NON_ISO )) \
     || die "not running from the Arch ISO (/run/archiso missing); set T14S_ALLOW_NON_ISO=1 to override"
   { ping -c1 -W3 archlinux.org || curl -fsS --max-time 6 https://archlinux.org; } >/dev/null 2>&1 \
     || die "no internet — connect first (iwctl / dhcp), then re-run"
@@ -336,8 +337,10 @@ else
     menu_args=()
     for d in "${DISKS[@]}"; do
       [[ -b $d ]] || continue
-      menu_args+=("$d" "$(lsblk -dnro SIZE,MODEL "$d" 2>/dev/null | sed 's/  */ /g')")
+      IFS=$'\x1f' read -r _sz _model < <(lsblk_rows "$d" SIZE MODEL) || true
+      menu_args+=("$d" "$(printf '%-7s %s' "${_sz:-?}" "${_model:-}")")
     done
+    unset -v _sz _model
     menu_args+=("manual" "type a device path")
 
     DISK="$(ui_menu "Select the target disk. AUTO wipes it entirely." "${menu_args[@]}")" \
@@ -418,13 +421,11 @@ Pick a smaller ESP."
     require_ni_erase
     warn "NONINTERACTIVE AUTO: will erase entire $DISK (ESP ${ESP_MB}MB + LUKS root)"
   else
-    ui_critical "AUTO mode ERASES the ENTIRE disk:
-
-$DISK
-
+    # Compact on purpose: the partition table being erased must fit an 80x24
+    # console without scrolling.
+    ui_critical "AUTO mode ERASES the ENTIRE disk $DISK,
+including any Windows / other-OS partitions on it.
 Plan: GPT · ${ESP_MB}MB ESP (FAT32) · remainder LUKS2 + Btrfs
-
-That includes any Windows / other-OS partitions on it.
 
 $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
     CONF="$(ui_input "Type the disk path to confirm total wipe" "")" || die "aborted"
@@ -460,9 +461,7 @@ else
     fi
     ok "MANUAL partitions from answers: EFI=$EFI_PART ROOT=$ROOT_PART format_efi=$FORMAT_EFI"
   else
-    ui_info "Manual partitioning on $DISK.
-
-Current layout (select from lists; sizes and existing filesystems shown):
+    ui_info "Manual partitioning on $DISK. Current layout (pick from lists next):
 
 $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
 
@@ -1047,7 +1046,7 @@ release_target_devices
 
 # ── 4b. write the partition table (AUTO only) ───────────────
 if [[ $MODE == auto ]]; then
-  step "partitioning $DISK (GPT: 2G ESP + LUKS)"
+  step "partitioning $DISK (GPT: ${ESP_MB}MB ESP + LUKS)"
   sgdisk --zap-all "$DISK" >/dev/null
   sgdisk -n1:0:+"${ESP_MB}"M -t1:ef00 -c1:EFI "$DISK" >/dev/null
   sgdisk -n2:0:0     -t2:8309 -c2:cryptroot "$DISK" >/dev/null
@@ -1251,7 +1250,7 @@ if [[ -n ${POST_HOOK_URL:-} ]]; then
     || die "POST_HOOK_URL must be https://… with no userinfo or spaces (got: $POST_HOOK_URL)"
   _hook_ok=0
   if (( NONINTERACTIVE )); then
-    if [[ ${T14S_POST_HOOK_I_UNDERSTAND:-0} == 1 ]]; then
+    if (( POST_HOOK_CONSENT )); then
       _hook_ok=1
     else
       warn "post-hook skipped in NONINTERACTIVE without T14S_POST_HOOK_I_UNDERSTAND=1"
@@ -1312,7 +1311,7 @@ else
   SNAPPER_HINT="root config enabled; add home later: snapper -c home create-config /home"
 fi
 if yn_on "$INSTALL_SELFTEST"; then
-  SELFTEST_HINT="Self-test: /usr/local/bin/t14s-selftest (BT/audio/wifi/apparmor/firewalld/s2idle/amd_pstate/BAT0/touchpad)"
+  SELFTEST_HINT="Self-test: /usr/local/bin/t14s-selftest (BT/audio/wifi/apparmor/firewalld/s2idle/cpufreq driver/BAT0/touchpad)"
 else
   SELFTEST_HINT="Self-test script not installed"
 fi
@@ -1329,13 +1328,22 @@ if yn_on "$INSTALL_DEVTOOLS"; then
 "
 fi
 
+# Profile-specific post-boot checks (P15 is Intel + NVIDIA, not Rembrandt).
+if [[ $HW_PROFILE == p15 ]]; then
+  CPU_HINT="lscpu | grep -i 'model name'   (expect Intel Core/Xeon)"
+  CMDLINE_HINT="grep -E 'intel_iommu|nvidia_drm' /proc/cmdline"
+else
+  CPU_HINT="lscpu | grep -i ryzen"
+  CMDLINE_HINT="grep -E 'amd_iommu|amd_pstate' /proc/cmdline"
+fi
+
 POST_TXT="T14s install — next steps
 
   Reboot and remove the ISO:   reboot
   Boot menu: Arch Linux (LTS) default, Hardened as fallback.
   Answers file: /root/t14s-answers.env (T14S_ANSWERS=... to reuse)
   Passwords: use T14S_PASS_FILE for unattended (never stored in answers)
-  Verify after boot: lscpu | grep -i ryzen
+  Verify after boot: ${CPU_HINT}
                      cat /sys/power/mem_sleep   (expect s2idle bracketed)
   Secure Boot (to enable):
     1) BIOS -> clear Secure Boot keys -> Setup Mode
@@ -1355,7 +1363,8 @@ POST_TXT="T14s install — next steps
   Fingerprint (fprintd on GNOME): fprintd-enroll
   Hostname: ${HOSTNAME}
   ${LOGIN_HINT}
-  Post-boot check: grep -E 'amd_iommu|amd_pstate' /proc/cmdline
+  Post-boot check: ${CMDLINE_HINT}
+  TRIM through LUKS: lsblk -D /dev/mapper/cryptroot   (DISC-GRAN non-zero)
   Charge thresholds (ThinkPad BAT* only; skip/absent on VM):
     cat /sys/class/power_supply/BAT0/charge_control_*_threshold
     (expect 70 / 80; oneshot thinkpad-charge-thresholds.service + tmpfiles)

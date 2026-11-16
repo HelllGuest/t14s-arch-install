@@ -26,20 +26,22 @@ _fw_perm() {
 }
 
 configure_firewalld() {
+  # FIREWALLD_CONF: override for tests only (never touch the host /etc).
+  local conf=${FIREWALLD_CONF:-/etc/firewalld/firewalld.conf}
   _fw_say "firewalld: default zone drop + optional ports"
 
-  mkdir -p /etc/firewalld
-  if [[ ! -f /etc/firewalld/firewalld.conf ]]; then
+  mkdir -p "$(dirname "$conf")"
+  if [[ ! -f $conf ]]; then
     printf '%s\n' '# seeded by Stage A' 'DefaultZone=drop' 'FirewallBackend=nftables' \
-      > /etc/firewalld/firewalld.conf
+      > "$conf"
   else
-    sed -i 's/^FirewallBackend=.*/FirewallBackend=nftables/' /etc/firewalld/firewalld.conf || true
-    grep -q '^FirewallBackend=' /etc/firewalld/firewalld.conf \
-      || echo 'FirewallBackend=nftables' >> /etc/firewalld/firewalld.conf
-    if grep -q '^DefaultZone=' /etc/firewalld/firewalld.conf; then
-      sed -i 's/^DefaultZone=.*/DefaultZone=drop/' /etc/firewalld/firewalld.conf
+    sed -i 's/^FirewallBackend=.*/FirewallBackend=nftables/' "$conf" || true
+    grep -q '^FirewallBackend=' "$conf" \
+      || echo 'FirewallBackend=nftables' >> "$conf"
+    if grep -q '^DefaultZone=' "$conf"; then
+      sed -i 's/^DefaultZone=.*/DefaultZone=drop/' "$conf"
     else
-      echo 'DefaultZone=drop' >> /etc/firewalld/firewalld.conf
+      echo 'DefaultZone=drop' >> "$conf"
     fi
   fi
 
@@ -54,6 +56,13 @@ configure_firewalld() {
   if yn_on "${ENABLE_SSHD:-N}"; then
     _fw_perm --add-service=ssh \
       || _fw_warn "firewalld: could not add ssh service"
+  fi
+
+  # Avahi/nss-mdns: replies to .local queries come from other hosts, so conntrack
+  # never matches them and the drop zone discards them without this service.
+  if yn_on "${INSTALL_AVAHI:-N}"; then
+    _fw_perm --add-service=mdns \
+      || _fw_warn "firewalld: could not allow mdns"
   fi
 
   # Syncthing: transfer 22000/tcp (+ optional quic 22000/udp), discovery 21027/udp

@@ -37,9 +37,18 @@ done
 mkdir -p "$WORK"
 
 if [[ ! -f $ISO ]]; then
+  ISO_URL=https://geo.mirror.pkgbuild.com/iso/latest
   say "downloading Arch ISO -> $ISO"
-  curl -fSL --retry 3 --continue-at - -o "$ISO.partial" \
-    https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+  # Verify before use: --continue-at can splice a stale .partial from an older
+  # "latest" release onto the new one.
+  want=$(curl -fsSL "$ISO_URL/sha256sums.txt" | awk '$2 == "archlinux-x86_64.iso" {print $1}')
+  [[ $want =~ ^[0-9a-f]{64}$ ]] || die "could not read ISO SHA-256 from $ISO_URL/sha256sums.txt"
+  curl -fSL --retry 3 --continue-at - -o "$ISO.partial" "$ISO_URL/archlinux-x86_64.iso"
+  got=$(sha256sum "$ISO.partial" | awk '{print $1}')
+  if [[ $got != "$want" ]]; then
+    rm -f -- "$ISO.partial"
+    die "ISO SHA-256 mismatch (got $got, want $want) — partial removed, re-run"
+  fi
   mv -f "$ISO.partial" "$ISO"
 fi
 say "ISO: $ISO ($(du -h "$ISO" | awk '{print $1}'))"
@@ -112,7 +121,7 @@ QEMU_PID=$!
 
 say "waiting for archiso login prompt"
 ok_login=0
-for i in $(seq 1 180); do
+for _ in $(seq 1 180); do
   if grep -a -q 'archiso login:' "$QEMU_LOG" 2>/dev/null; then
     ok_login=1
     break
@@ -151,7 +160,7 @@ done
 
 if kill -0 "$QEMU_PID" 2>/dev/null; then
   printf 'poweroff\r' >&3 || true
-  for i in $(seq 1 30); do
+  for _ in $(seq 1 30); do
     kill -0 "$QEMU_PID" 2>/dev/null || break
     sleep 2
   done

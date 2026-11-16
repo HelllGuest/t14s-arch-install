@@ -80,9 +80,22 @@ if [[ $model =~ 21C[QR] ]]; then PASS "DMI is T14s Gen 3 AMD (${model//$'\n'/ })
 else WARN "DMI is not 21CQ/21CR (${model//$'\n'/ }) — hardware checks may not apply"; fi
 check "booted in UEFI mode" test -d /sys/firmware/efi
 cmdline=$(read1 /proc/cmdline)
-for flag in amd_iommu=on amd_pstate=active mem_sleep_default=s2idle apparmor=1 security=apparmor; do
+for flag in amd_iommu=on amd_pstate=active mem_sleep_default=s2idle; do
   if [[ " $cmdline " == *" $flag "* ]]; then PASS "kernel cmdline has $flag"; else FAIL "kernel cmdline missing $flag"; fi
 done
+# AppArmor: current installs use lsm=…apparmor…; older ones security=apparmor.
+if [[ " $cmdline " =~ \ lsm=[^\ ]*apparmor || " $cmdline " == *" security=apparmor "* ]]; then
+  PASS "kernel cmdline enables AppArmor"
+else
+  FAIL "kernel cmdline enables neither lsm=…apparmor… nor security=apparmor"
+fi
+# TRIM through dm-crypt (fstrim.timer is useless without it). Older installs: WARN.
+if [[ " $cmdline " == *" rd.luks.options="*discard* ]] \
+  || [[ $(lsblk -dno DISC-GRAN /dev/mapper/cryptroot 2>/dev/null | tr -d ' ') =~ ^[1-9] ]]; then
+  PASS "LUKS root passes discards (TRIM)"
+else
+  WARN "LUKS root drops discards — add rd.luks.options=discard or: cryptsetup --allow-discards --persistent refresh cryptroot"
+fi
 drv=$(read1 /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver)
 if [[ $drv == amd-pstate* ]]; then PASS "cpufreq driver $drv"; else FAIL "cpufreq driver is '${drv:-none}', expected amd-pstate*"; fi
 if compgen -G '/sys/class/iommu/*' >/dev/null; then PASS "IOMMU active"; else FAIL "no IOMMU in /sys/class/iommu"; fi

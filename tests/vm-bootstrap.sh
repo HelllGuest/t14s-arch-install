@@ -15,7 +15,7 @@ echo "=== t14s VM bootstrap $(date -Is) ==="
 echo "BASE=$BASE DISK=$DISK"
 
 # Wait for DHCP / DNS
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   if curl -fsS --max-time 3 "$BASE/install.sh" >/dev/null; then
     break
   fi
