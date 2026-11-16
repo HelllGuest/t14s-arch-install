@@ -45,11 +45,7 @@ source /root/t14s-lib.sh
 
 stage 0 4 "locale, time, hostname, pacman"
 # time / locale / keymap
-if [[ $TIMEZONE == UTC ]]; then
-  ln -sf /usr/share/zoneinfo/UTC /etc/localtime
-else
-  ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
-fi
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
 hwclock --systohc
 # Escape BRE metacharacters so en_US.UTF-8 dots are literal in sed.
 _loc_esc=$(printf '%s\n' "$LOCALE" | sed 's/[.[\\*^$]/\\&/g')
@@ -245,16 +241,14 @@ fi
 stage 8 24 "building unified kernel images"
 # UKI presets: linux-lts (primary) + linux-hardened (fallback)
 # Re-clean Arch EFI artifacts before rebuild (host already cleaned /mnt/boot).
-if yn_on "${CLEAN_ESP_ARCH}"; then
-  say "CLEAN_ESP_ARCH — removing old Arch UKIs / loader entries / EFI/arch"
-fi
 # Do NOT touch /boot/vmlinuz-* or *-ucode.img here: pacstrap just installed
 # them and mkinitcpio -P below reads ALL_kver from vmlinuz. Stale copies were
 # already removed on the host before pacstrap (clean_esp_arch_files).
 # Full UKI / loader-entry clean only when CLEAN_ESP_ARCH=Y.
 # (Function inlined — chroot has no host helpers.)
 if yn_on "${CLEAN_ESP_ARCH}"; then
-  rm -f /boot/EFI/Linux/arch-linux*.efi /boot/EFI/Linux/arch*.efi 2>/dev/null || true
+  say "CLEAN_ESP_ARCH — removing old Arch UKIs / loader entries / EFI/arch"
+  rm -f /boot/EFI/Linux/arch*.efi 2>/dev/null || true
   if [[ -d /boot/loader/entries ]]; then
     find /boot/loader/entries -maxdepth 1 -type f \
       -name 'arch*.conf' -delete 2>/dev/null || true
@@ -932,7 +926,7 @@ check_wifi() {
   nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -q ':wifi:connected' \
     || nmcli networking connectivity 2>/dev/null | grep -qi full
 }
-# firewalld status (user-callable; keep in sync with lib/70-firewall.sh).
+# firewalld status (user-callable; enabled counts before the first start).
 check_firewalld() {
   systemctl is-active --quiet firewalld 2>/dev/null \
     || systemctl is-enabled --quiet firewalld 2>/dev/null

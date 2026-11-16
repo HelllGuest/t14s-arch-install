@@ -83,7 +83,7 @@ if command -v unshare >/dev/null 2>&1 && unshare -rn true 2>/dev/null; then
   unset -v _off_tmp _off_err
 fi
 grep -q 'is-active --quiet firewalld' "$ROOT/lib/80-chroot-setup.sh" \
-  || fail "chroot check_firewalld must prefer is-active (sync with 70-firewall)"
+  || fail "selftest check_firewalld must prefer is-active"
 grep -q '70-firewall.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 70-firewall.sh"
 grep -q '80-chroot-setup.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 80-chroot-setup.sh"
 grep -q 't14s_base_packages' "$INSTALL_SH" || fail "pacstrap must use t14s_base_packages"

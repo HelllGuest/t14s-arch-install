@@ -53,9 +53,8 @@ fi
 export T14S_REF="${T14S_REF:-}" T14S_BASE_URL="${T14S_BASE_URL:-}" T14S_LIB_DIR
 
 # Defaults needed before any sourced lib runs say()/die under set -u
+# (colors come from lib/00-common.sh, which loads first).
 LOGGING=0
-c0=$'\e[0m'; cR=$'\e[1;31m'; cG=$'\e[1;32m'; cY=$'\e[1;33m'; cB=$'\e[1;34m'
-cC=$'\e[1;36m'
 UI=${T14S_UI:-plain}
 NONINTERACTIVE=0
 LOG="$(mktemp /tmp/t14s-install.XXXXXX.log)"
@@ -80,7 +79,7 @@ _load_lib() {
 }
 
 for _lib in 00-common.sh 10-ui.sh 20-answers.sh 30-hardware.sh 40-disk.sh \
-            50-packages.sh 60-boot.sh 70-firewall.sh; do
+            50-packages.sh 70-firewall.sh; do
   _load_lib "$_lib"
 done
 unset -v _lib
@@ -95,7 +94,6 @@ case ${_dr,,} in
   *) printf 'T14S_DRYRUN=%q not recognized (use 1 or 0)\n' "$_dr" >&2; exit 2 ;;
 esac
 unset -v _dr
-UI=${T14S_UI:-plain}
 # Accept 1/y/yes/on (case-insensitive) for env toggles — same spirit as yn_on.
 _env_on() { local v=${1,,}; [[ $v == 1 || $v == y || $v == yes || $v == on ]]; }
 if _env_on "${T14S_NONINTERACTIVE:-0}"; then NONINTERACTIVE=1; else NONINTERACTIVE=0; fi

@@ -91,8 +91,3 @@ configure_firewalld() {
   fi
   _fw_ok "firewalld configured (zone drop)"
 }
-
-check_firewalld() {
-  systemctl is-active --quiet firewalld 2>/dev/null \
-    || systemctl is-enabled --quiet firewalld 2>/dev/null
-}

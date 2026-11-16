@@ -9,8 +9,7 @@ clean_esp_arch_files() {
   rm -f "$root"/intel-ucode.img "$root"/amd-ucode.img \
         "$root"/vmlinuz-linux* "$root"/initramfs-linux* 2>/dev/null || true
   if yn_on "${CLEAN_ESP_ARCH:-Y}"; then
-    rm -f "$root"/EFI/Linux/arch-linux*.efi \
-          "$root"/EFI/Linux/arch*.efi 2>/dev/null || true
+    rm -f "$root"/EFI/Linux/arch*.efi 2>/dev/null || true
     if [[ -d $root/loader/entries ]]; then
       find "$root/loader/entries" -maxdepth 1 -type f \
         -name 'arch*.conf' -delete 2>/dev/null || true
