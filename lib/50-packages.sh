@@ -31,3 +31,35 @@ t14s_base_packages() {
     BASE_PKGS+=(plymouth)
   fi
 }
+
+# prefetch_pkgs CACHE PKG...: download every package (and every dependency)
+# into the target's package cache before pacstrap. A download is safe to retry
+# (resumes, never touches the new root), so flaky mirrors get several attempts
+# here; pacstrap then installs from the cache. pacstrap itself must stay a
+# single run: re-running it on a half-populated root hits "conflicting files".
+# An empty temporary local db makes pacman fetch the full dependency closure
+# (the live ISO's installed packages would otherwise be skipped).
+prefetch_pkgs() {
+  local cache=$1 db try tries=${PREFETCH_TRIES:-4}
+  shift
+  db="$(mktemp -d)"
+  # pacman downloads as the unprivileged DownloadUser (alpm) in a sandbox: the
+  # db dir must be traversable (mktemp -d is 0700), or every sync fails with
+  # "could not open file …/sync/download-*/core.db.part: Permission denied".
+  chmod 0755 "$db"
+  mkdir -p "$db/local" "$cache"
+  for ((try = 1; try <= tries; try++)); do
+    if pacman -Syw --noconfirm --dbpath "$db" --cachedir "$cache" -- "$@"; then
+      rm -rf -- "$db"
+      return 0
+    fi
+    if (( try < tries )); then
+      echo "package download failed (attempt $try/$tries); retrying" >&2
+      sleep $(( try * ${PREFETCH_BACKOFF:-10} ))
+    else
+      echo "package download failed (attempt $try/$tries); giving up" >&2
+    fi
+  done
+  rm -rf -- "$db"
+  return 1
+}

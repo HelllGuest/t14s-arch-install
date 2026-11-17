@@ -323,7 +323,11 @@ confirm UI). Log: `/tmp/t14s-install.*.log`. pacstrap and the chroot step
 show a percentage gauge (dialog or whiptail `--gauge`): downloads, package
 installs `(k/N)`, hooks, then named chroot stages (UKIs, GNOME, Secure Boot…).
 Other long steps use `dialog --progressbox`; the plain UI streams raw output.
-Optional package sets never abort the install: a failure records pacman's own
+All packages are downloaded first, into the target's pacman cache, before
+anything is installed: a mirror reset or stall is retried (`PREFETCH_TRIES`,
+default 4, backoff `PREFETCH_BACKOFF` × attempt seconds, default 10), and if
+every attempt fails the installer stops with nothing installed, so a re-run
+starts clean. pacstrap then installs from the cache. Optional package sets never abort the install: a failure records pacman's own
 `error:` line (key/signature errors refresh `archlinux-keyring` and retry once),
 and every warning is listed on the finish screen and in
 `/root/t14s-post-install.txt`. The full log is kept at
@@ -361,6 +365,8 @@ journalctl -u t14s-flatpak-apps -f   # GNOME: browsers/VPN install once online
 curl -fsSLO https://raw.githubusercontent.com/HelllGuest/t14s-arch-install/main/tests/host-check.sh
 bash host-check.sh          # as your desktop user
 sudo bash host-check.sh     # adds /boot UKIs, LUKS PBKDF, sbctl, snapper
+# With the dotfiles checkout (Stage B): same host-check plus post-install checks
+#   sudo -v && bash ~/dotfiles/scripts/check.sh --all
 tuned-adm active                     # if tuned chosen (GNOME power menu → tuned-ppd)
 sudo less /var/log/t14s-install.log  # full installer log
 ```

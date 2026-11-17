@@ -1496,4 +1496,33 @@ for _scr in 'ui_critical "AUTO mode ERASES' 'ui_info "Manual partitioning on'; d
 done
 unset -v _scr _n
 
+# prefetch_pkgs: downloads retried (mirror resets aborted pacstrap mid-install);
+# pacstrap runs once, after a successful prefetch, from the target cache.
+_pfx="$(mktemp -d)"; mkdir -p "$_pfx/bin"
+cat >"$_pfx/bin/pacman" <<EOF
+#!/bin/sh
+echo "\$*" >>"$_pfx/calls"
+n=\$(wc -l <"$_pfx/calls")
+[ "\$n" -ge "\${PF_OK_AT:-3}" ]
+EOF
+chmod +x "$_pfx/bin/pacman"
+_pfrun() { PATH="$_pfx/bin:$PATH" PREFETCH_BACKOFF=0 bash -c 'source "$1"; shift; prefetch_pkgs "$@"' _ \
+  "$ROOT/lib/50-packages.sh" "$_pfx/cache" base linux 2>&1; }
+_o="$(PF_OK_AT=3 _pfrun)" || fail "prefetch must succeed on the 3rd attempt: $_o"
+[[ $(wc -l <"$_pfx/calls") -eq 3 ]] || fail "prefetch must retry until success"
+grep -q -- "-Syw --noconfirm --dbpath .* --cachedir $_pfx/cache -- base linux" "$_pfx/calls" \
+  || fail "prefetch must download only, into the target cache, with a private db: $(head -1 "$_pfx/calls")"
+[[ $(grep -c retrying <<<"$_o") -eq 2 ]] || fail "each failed attempt must say it retries: $_o"
+rm -f "$_pfx/calls"
+_o="$(PF_OK_AT=99 PREFETCH_TRIES=3 _pfrun)" && fail "prefetch must fail after the last attempt" || true
+[[ $(wc -l <"$_pfx/calls") -eq 3 ]] && grep -q 'giving up' <<<"$_o" || fail "must stop after PREFETCH_TRIES and say so: $_o"
+_pf_line="$(grep -n 'prefetch_pkgs /mnt/var/cache/pacman/pkg' "$ROOT/install.sh" | cut -d: -f1)"
+_ps_line="$(grep -n 'pacstrap -K /mnt' "$ROOT/install.sh" | head -1 | cut -d: -f1)"
+[[ -n $_pf_line && -n $_ps_line ]] && (( _pf_line < _ps_line )) || fail "install.sh must prefetch before pacstrap"
+grep -A2 'prefetch_pkgs /mnt/var/cache/pacman/pkg' "$ROOT/install.sh" | grep -q '|| die' \
+  || fail "a failed prefetch must stop before pacstrap touches the root"
+grep -q 'chmod 0755 "$db"' "$ROOT/lib/50-packages.sh" \
+  || fail "prefetch db dir must be traversable by pacman's download user (alpm sandbox)"
+rm -rf "$_pfx"; unset -v _pfx _o _pf_line _ps_line; unset -f _pfrun
+
 echo "PASS: smoke.test.sh"

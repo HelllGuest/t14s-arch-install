@@ -1100,7 +1100,7 @@ unset -v _reflector_args
 # (old runs of this script added a curl XferCommand — drop it on re-runs).
 # DisableDownloadTimeout keeps slow mirrors from aborting ("Operation too slow").
 # Single pacstrap — no retry loop, which would re-run on a partially-populated
-# root and hit 'conflicting files'.
+# root and hit 'conflicting files'. Retries happen in prefetch_pkgs (download only).
 pacman_tune /etc/pacman.conf "$PACMAN_PARALLEL"
 
 t14s_base_packages
@@ -1117,7 +1117,12 @@ if ((${#EXTRA_PKGS[@]})); then
   EXTRA_PKGS=("${_extra_clean[@]}")
   unset -v _seen _extra_clean _p
 fi
-run_gauge "pacstrap base system ($UCODE) — downloading/installing packages" 0 100 \
+# Downloads first, with retries (prefetch_pkgs); a mirror that resets
+# connections mid-download used to abort the whole install here.
+run_gauge "downloading packages ($UCODE base + extras) — retried on mirror errors" 0 50 \
+  prefetch_pkgs /mnt/var/cache/pacman/pkg "${BASE_PKGS[@]}" ${EXTRA_PKGS[@]+"${EXTRA_PKGS[@]}"} \
+  || die "package download failed after ${PREFETCH_TRIES:-4} attempts (network / mirrors) — nothing installed yet; re-run the installer"
+run_gauge "pacstrap base system ($UCODE) — installing packages" 50 100 \
   pacstrap -K /mnt "${BASE_PKGS[@]}" ${EXTRA_PKGS[@]+"${EXTRA_PKGS[@]}"}
 
 step "genfstab"
