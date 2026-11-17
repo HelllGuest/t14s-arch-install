@@ -53,6 +53,10 @@ LUKS_PASS=vmtest-luks-pass-change-me
 USER_PASS=vmtest-user-pass-change-me
 ROOT_PASS=vmtest-root-pass-change-me
 EOF
+# Full desktop rehearsal: T14S_VM_DESKTOP=Y (default minimal, no GNOME).
+if [[ ${T14S_VM_DESKTOP:-N} == Y ]]; then
+  sed -i 's/^DESKTOP=N$/DESKTOP=Y/' /tmp/t14s-answers.env
+fi
 chmod 600 /tmp/t14s-answers.env /tmp/t14s-pass.env
 
 export T14S_BASE_URL="$BASE"

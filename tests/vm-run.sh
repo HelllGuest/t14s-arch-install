@@ -86,11 +86,11 @@ cleanup() {
 trap cleanup EXIT
 
 python3 -m http.server "$PORT" --bind 127.0.0.1 --directory "$ROOT" \
-  >/tmp/t14s-vm-http.log 2>&1 &
+  >"$WORK/http.log" 2>&1 &
 HTTP_PID=$!
 sleep 1
 curl -fsS --max-time 3 "http://127.0.0.1:$PORT/install.sh" >/dev/null \
-  || die "http.server failed (see /tmp/t14s-vm-http.log)"
+  || die "http.server failed (see $WORK/http.log)"
 say "serving $ROOT on 127.0.0.1:$PORT guest=10.0.2.2:$PORT"
 
 # Pre-create pipe ends. Open RDWR so open(2) never blocks (Linux FIFO rule).
@@ -116,7 +116,7 @@ qemu-system-x86_64 \
   -serial pipe:"$PIPE" \
   -monitor none \
   -no-reboot \
-  >/tmp/t14s-vm-qemu-stdout.log 2>"$WORK/qemu-stderr.log" &
+  >"$WORK/qemu-stdout.log" 2>"$WORK/qemu-stderr.log" &
 QEMU_PID=$!
 
 say "waiting for archiso login prompt"
@@ -142,6 +142,8 @@ say "logging in over serial and starting bootstrap"
   printf 'bash --norc --noprofile\r'
   sleep 2
   printf 'export T14S_VM_PORT=%s\r' "$PORT"
+  sleep 1
+  printf 'export T14S_VM_DESKTOP=%s\r' "${T14S_VM_DESKTOP:-N}"
   sleep 1
   printf 'curl -fsSL http://10.0.2.2:%s/tests/vm-bootstrap.sh | bash; echo T14S_VM_DONE=$?\r' "$PORT"
 } >&3
