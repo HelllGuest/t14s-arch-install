@@ -194,6 +194,27 @@ Prefer `bash <(curl …)` so menus keep a real TTY.
 UI order: **`dialog`** → `whiptail` → plain. Override: `T14S_UI=dialog|whiptail|plain` (any other value falls back to plain).
 Box size follows the console (read from `/dev/tty`): menus, logs and progress use about 2/3 of a large console (up to 120x44), prose boxes stay about 84 columns wide, and nothing is drawn larger than the screen. Long screens (Review, finish) get `--scrolltext` under whiptail, which otherwise cuts them off.
 
+### Reinstall next to Windows (shared ESP)
+
+1. Back up `/home` (the Arch root partition is erased) and note the Windows
+   BitLocker recovery key: enrolling new Secure Boot keys usually makes Windows
+   ask for it once. In Windows, turn off Fast Startup.
+2. BIOS (F1): Secure Boot → Reset to Setup Mode, Secure Boot off (the Arch ISO
+   is not signed). Boot the ISO from F12.
+3. Run the installer, choose **MANUAL**: ROOT = the old Arch partition (LUKS),
+   EFI = the existing FAT32 ESP with **reuse** (the default whenever the disk
+   already has one; formatting it deletes Windows Boot Manager). The review
+   must show `EFI … (reuse)`.
+4. `EFI/Microsoft` and the Windows partitions are not touched; old Arch UKIs,
+   `arch*.conf` entries and bare kernels are removed (`CLEAN_ESP_ARCH=Y`);
+   `BOOTX64.EFI` and `loader.conf` are kept as `*.pre-arch.bak`. systemd-boot
+   lists Windows Boot Manager automatically (same ESP).
+5. After first boot: `sudo sbctl verify && sudo sbctl enroll-keys -m` (unless
+   the installer enrolled), Secure Boot on, then `bash tests/host-check.sh`
+   (it fails when no firmware entry loads systemd-boot from this ESP).
+
+Rehearse it: `VM_BOOTSTRAP=tests/vm-dual-bootstrap.sh FRESH=1 bash tests/vm-run.sh`.
+
 ### Screens
 
 Backtitle: `T14s Arch Installer · N/11 · Phase` (Heads-style progress).
@@ -457,6 +478,7 @@ That is normal, not installer clutter.
 | `EFI/Linux/arch-linux-*.efi` | Unified Kernel Images | mkinitcpio UKI presets |
 | `EFI/systemd/systemd-bootx64.efi` | systemd-boot binary | `bootctl install` |
 | `EFI/BOOT/BOOTX64.EFI` | Removable / fallback loader | Firmware default path |
+| NVRAM `Linux Boot Manager` | Firmware entry → `EFI/systemd/systemd-bootx64.efi`, first in `BootOrder` | installer (`efibootmgr` from the live ISO; `bootctl` in the chroot cannot write EFI variables) |
 | `loader/loader.conf` | Default entry, timeout | systemd-boot (ESP root) |
 | `loader/entries/*.conf` | Classic type-1 entries | Legacy / other tools |
 
@@ -510,6 +532,12 @@ data.
 ### What this installer already does
 
 * Builds UKIs and signs them with **`sbctl`** (plus systemd-boot / `BOOTX64.EFI`)
+* Writes the firmware entry `Linux Boot Manager` for the chosen ESP, first in
+  `BootOrder`, and removes stale `Linux Boot Manager` entries that point at
+  another partition (earlier installs). Other OS entries stay. If it cannot,
+  the finish screen lists the `efibootmgr` command to run after first boot;
+  until then Arch boots only through the `BOOTX64.EFI` fallback, which a
+  Windows Boot Manager entry or update can take over
 * Optional enroll when Setup Mode is on **and** `sbctl verify` passes
 * LUKS2 on root; no secrets written to the ESP
 * Optional Arch ESP cleanup (`CLEAN_ESP_ARCH`)
@@ -569,6 +597,9 @@ FRESH=1 bash tests/vm-run.sh
 # serves this tree on :8765, boots Arch ISO, serial-drives tests/vm-bootstrap.sh
 # (minimal preset, ENABLE_SSHD=Y). Log: ~/arch-vmtest/qemu-serial.log
 T14S_VM_DESKTOP=Y FRESH=1 bash tests/vm-run.sh   # same, with the GNOME desktop
+# dual-boot reinstall: shared ESP with (synthetic) Windows files, old Arch LUKS and
+# a stale firmware entry; MANUAL reuse; checks Windows untouched + firmware entry
+VM_BOOTSTRAP=tests/vm-dual-bootstrap.sh FRESH=1 bash tests/vm-run.sh
 # two VMs at once: distinct WORK=… (disk, logs) and PORT=… (HTTP server)
 ```
 
@@ -612,7 +643,7 @@ lib/50-packages.sh         # package list stubs / helpers
 lib/70-firewall.sh         # firewalld drop zone via firewall-offline-cmd; FW_* ports; mask ufw;
                            #   live reload only outside arch-chroot when firewall-cmd --state answers
 lib/80-chroot-setup.sh     # chroot body (deployed into the target)
-tests/                     # smoke + host-check; vm-run.sh / vm-bootstrap.sh headless VM rehearsal
+tests/                     # smoke + host-check; vm-run.sh + vm-bootstrap.sh / vm-dual-bootstrap.sh headless VM rehearsals
 ```
 
 Local work (no GitHub fetch of `lib/`):

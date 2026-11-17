@@ -19,6 +19,72 @@ clean_esp_arch_files() {
   fi
 }
 
+# ── firmware boot entry ────────────────────────────────────
+# bootctl runs in the chroot, where it skips EFI variables ("running in a
+# container"), so without this Arch boots only through the \EFI\BOOT fallback:
+# a Windows Boot Manager entry, or a Windows update rewriting BOOTX64.EFI, wins.
+SDBOOT_LOADER='\EFI\systemd\systemd-bootx64.efi'
+
+# sdboot_plan ESP_PARTUUID < efibootmgr output
+#   "delete NNNN" per (Fallback) Linux Boot Manager entry on another ESP (old
+#   installs, deleted partitions), then "keep NNNN" for an entry already loading
+#   systemd-boot from this ESP, else "create". Other OS entries are never listed.
+sdboot_plan() {
+  local uuid=${1,,} line low id keep=""
+  while IFS= read -r line; do
+    [[ $line =~ ^Boot([0-9A-Fa-f]{4})\*?[[:space:]]+(Fallback\ )?Linux\ Boot\ Manager([[:space:]]|$) ]] || continue
+    id=${BASH_REMATCH[1]} low=${line,,}
+    if [[ $low != *",gpt,$uuid,"* ]]; then
+      echo "delete $id"
+    elif [[ -z ${BASH_REMATCH[2]} && -z $keep && $low == *'\efi\systemd\systemd-bootx64.efi'* ]]; then
+      keep=$id
+    fi
+  done
+  if [[ -n $keep ]]; then echo "keep $keep"; else echo create; fi
+}
+
+# boot_order_front ID < efibootmgr output → BootOrder value with ID first.
+boot_order_front() {
+  local id=$1 order o rest=""
+  order=$(sed -n 's/^BootOrder: *//p')
+  for o in ${order//,/ }; do [[ ${o^^} == "${id^^}" ]] || rest+=",$o"; done
+  printf '%s%s\n' "$id" "$rest"
+}
+
+# ensure_boot_entry ESP_PART: "Linux Boot Manager" for this ESP, first in BootOrder.
+# Returns 1 (after a warning) when it could not; Arch then still boots via the fallback.
+ensure_boot_entry() {
+  local esp=$1 uuid disk partn act id
+  if [[ ! -d /sys/firmware/efi/efivars ]] || ! command -v efibootmgr >/dev/null 2>&1; then
+    warn "no EFI variables or efibootmgr: firmware boot entry not written"
+    return 1
+  fi
+  uuid=$(lsblk -dno PARTUUID "$esp" 2>/dev/null)
+  disk=$(lsblk -dno PKNAME "$esp" 2>/dev/null)
+  partn=$(cat "/sys/class/block/${esp##*/}/partition" 2>/dev/null)
+  if [[ -z $uuid || -z $disk || -z $partn ]]; then
+    warn "cannot resolve $esp (PARTUUID/disk/partition number): firmware boot entry not written"
+    return 1
+  fi
+  while read -r act id; do
+    case $act in
+      delete)
+        if efibootmgr -q -b "$id" -B; then say "removed stale firmware entry Boot$id (Linux Boot Manager on another ESP)"
+        else warn "could not remove stale firmware entry Boot$id"; fi ;;
+      keep)
+        efibootmgr -q -o "$(efibootmgr | boot_order_front "$id")" \
+          || { warn "could not put Boot$id first in BootOrder"; return 1; }
+        ok "firmware entry Boot$id (Linux Boot Manager on $esp) is first in BootOrder" ;;
+      create)
+        # efibootmgr --create prepends the new entry to BootOrder.
+        efibootmgr -q --create --disk "/dev/$disk" --part "$partn" \
+          --label "Linux Boot Manager" --loader "$SDBOOT_LOADER" \
+          || { warn "could not create the firmware boot entry"; return 1; }
+        ok "created firmware entry Linux Boot Manager ($esp), first in BootOrder" ;;
+    esac
+  done < <(efibootmgr | sdboot_plan "$uuid")
+}
+
 # Replay checklist extras from answers (space-separated package names).
 apply_extra_pkgs_list() {
   [[ -n ${EXTRA_PKGS_LIST:-} ]] || return 0

@@ -71,6 +71,17 @@ snapper_has_config() {
   snapper --csvout list-configs 2>/dev/null | awk -F, -v n="$1" 'NR > 1 && $1 == n {f = 1} END {exit !f}'
 }
 
+# sdboot_entry ESP_PARTUUID < efibootmgr output: BootNNNN of the "Linux Boot
+# Manager" entry loading systemd-boot from that ESP (empty when none).
+sdboot_entry() {
+  local uuid=${1,,} line
+  while IFS= read -r line; do
+    [[ $line =~ ^Boot([0-9A-Fa-f]{4})\*?[[:space:]]+Linux\ Boot\ Manager[[:space:]] ]] || continue
+    [[ ${line,,} == *",gpt,$uuid,"*'\efi\systemd\systemd-bootx64.efi'* ]] && { echo "${BASH_REMATCH[1]}"; return 0; }
+  done
+  return 0
+}
+
 if [[ ${HOST_CHECK_LIB:-0} == 1 ]]; then return 0 2>/dev/null || exit 0; fi
 
 # ── platform ────────────────────────────────────────────────
@@ -113,6 +124,21 @@ for k in linux-lts linux-hardened; do check "kernel package $k installed" pacman
 sbvar=$(compgen -G '/sys/firmware/efi/efivars/SecureBoot-*' | head -1)
 if [[ -n $sbvar ]] && [[ $(od -An -tu1 -j4 -N1 "$sbvar" 2>/dev/null | tr -d ' ') == 1 ]]; then PASS "Secure Boot enabled"
 else WARN "Secure Boot off (enable after: sudo sbctl enroll-keys -m)"; fi
+# Firmware entry for systemd-boot on the current ESP (bootctl in the installer's
+# chroot never wrote one; without it Arch boots only via the \EFI\BOOT fallback).
+esp_uuid=$(lsblk -dno PARTUUID "$(findmnt -nvo SOURCE /boot 2>/dev/null)" 2>/dev/null)
+if [[ -z $esp_uuid ]] || ! has efibootmgr || ! efi_out=$(efibootmgr 2>/dev/null); then
+  SKIP "firmware boot entry check (needs efibootmgr and a mounted /boot ESP)"
+else
+  sd_id=$(sdboot_entry "$esp_uuid" <<<"$efi_out")
+  if [[ -z $sd_id ]]; then
+    FAIL "no firmware entry loads systemd-boot from this ESP (booting via the \\EFI\\BOOT fallback only) — sudo efibootmgr --create --disk /dev/$(lsblk -dno PKNAME "$(findmnt -nvo SOURCE /boot)") --part $(cat "/sys/class/block/$(basename "$(findmnt -nvo SOURCE /boot)")/partition") --label 'Linux Boot Manager' --loader '\\EFI\\systemd\\systemd-bootx64.efi'"
+  elif [[ $(sed -n 's/^BootOrder: *//p' <<<"$efi_out") == "$sd_id"* ]]; then
+    PASS "firmware entry Boot$sd_id (Linux Boot Manager) first in BootOrder"
+  else
+    WARN "Boot$sd_id (Linux Boot Manager) is not first in BootOrder — another OS boots by default"
+  fi
+fi
 if is_root; then
   check "systemd-boot installed on ESP" bootctl is-installed
   if compgen -G '/boot/EFI/Linux/arch-linux-lts*.efi' >/dev/null; then PASS "linux-lts UKI on ESP"; else FAIL "no arch-linux-lts UKI in /boot/EFI/Linux"; fi

@@ -81,4 +81,11 @@ chmod +x "$T/bin/snapper"
 ! hc snapper_has_config root || fail "snapper_has_config must not match root2"
 hc snapper_has_config home || fail "snapper_has_config must find home"
 
+# sdboot_entry: only "Linux Boot Manager" loading systemd-boot from this ESP counts.
+_fx='BootOrder: 0003,0001
+Boot0001* Linux Boot Manager	HD(1,GPT,0a1d6820-8fd4-47d9-be7c-79d7fdcf6c40,0x800,0x200000)/\EFI\systemd\systemd-bootx64.efi
+Boot0003* Windows Boot Manager	HD(1,GPT,cc7ae317-8288-40f3-bfee-a6983a51c9b5,0x800,0x578000)/\EFI\Microsoft\Boot\bootmgfw.efi'
+[[ -z $(hc sdboot_entry cc7ae317-8288-40f3-bfee-a6983a51c9b5 <<<"$_fx") ]] || fail "stale entry on another ESP must not count"
+[[ $(hc sdboot_entry 0A1D6820-8FD4-47D9-BE7C-79D7FDCF6C40 <<<"$_fx") == 0001 ]] || fail "entry on this ESP must be found (case-insensitive)"
+
 echo "PASS: host-check.test.sh"

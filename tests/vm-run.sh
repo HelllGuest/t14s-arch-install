@@ -3,9 +3,10 @@
 #
 #   bash tests/vm-run.sh
 #   FRESH=1 bash tests/vm-run.sh
+#   VM_BOOTSTRAP=tests/vm-dual-bootstrap.sh FRESH=1 bash tests/vm-run.sh  # dual-boot reinstall
 #
 # Serves this repo on 127.0.0.1:PORT, boots Arch ISO, drives serial console
-# (qemu pipe) to run tests/vm-bootstrap.sh. Host disks untouched.
+# (qemu pipe) to run $VM_BOOTSTRAP (default tests/vm-bootstrap.sh). Host disks untouched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -16,6 +17,7 @@ RAM=${RAM:-4096}
 SMP=${SMP:-4}
 PORT=${PORT:-8765}
 ISO=${ISO:-$WORK/archlinux-x86_64.iso}
+VM_BOOTSTRAP=${VM_BOOTSTRAP:-tests/vm-bootstrap.sh}
 QEMU_IMG=${QEMU_IMG:-/usr/bin/qemu-img}
 [[ -x $QEMU_IMG ]] || QEMU_IMG=qemu-img
 
@@ -25,7 +27,7 @@ die(){ printf '\e[1;31mERR\e[0m %s\n' "$*" >&2; exit 1; }
 command -v qemu-system-x86_64 >/dev/null || die "need qemu-system-x86_64"
 [[ -e /dev/kvm ]] || die "need /dev/kvm"
 [[ -x $ROOT/install.sh ]] || die "missing $ROOT/install.sh"
-[[ -x $ROOT/tests/vm-bootstrap.sh ]] || die "missing vm-bootstrap.sh"
+[[ $VM_BOOTSTRAP =~ ^tests/[A-Za-z0-9._-]+\.sh$ && -x $ROOT/$VM_BOOTSTRAP ]] || die "missing or invalid VM_BOOTSTRAP $VM_BOOTSTRAP"
 
 ovmf_code=""; ovmf_vars_src=""
 for c in /usr/share/edk2/x64/OVMF_CODE.4m.fd /usr/share/edk2/x64/OVMF_CODE.fd \
@@ -145,7 +147,7 @@ say "logging in over serial and starting bootstrap"
   sleep 1
   printf 'export T14S_VM_DESKTOP=%s\r' "${T14S_VM_DESKTOP:-N}"
   sleep 1
-  printf 'curl -fsSL http://10.0.2.2:%s/tests/vm-bootstrap.sh | bash; echo T14S_VM_DONE=$?\r' "$PORT"
+  printf 'curl -fsSL http://10.0.2.2:%s/%s | bash; echo T14S_VM_DONE=$?\r' "$PORT" "$VM_BOOTSTRAP"
 } >&3
 
 say "waiting for installer to finish (up to 90 min)"

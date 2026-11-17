@@ -466,8 +466,10 @@ $(lsblk -o NAME,SIZE,FSTYPE,PARTTYPENAME "$DISK" 2>/dev/null)"
     ROOT_PART="$(pick_part "Select ROOT — ERASED, becomes LUKS2 + Btrfs" "$DISK")" \
       || die "aborted"
     while :; do
-      _ef_reuse=on; _ef_fmt=off
-      [[ ${FORMAT_EFI:-1} == 0 ]] || { _ef_reuse=off; _ef_fmt=on; }
+      # Default to reuse when the disk already has a FAT32 ESP (shared with
+      # Windows / another OS); formatting it would delete their boot loaders.
+      _ef_reuse=off; _ef_fmt=on
+      if lsblk -prno FSTYPE "$DISK" 2>/dev/null | grep -qx vfat; then _ef_reuse=on; _ef_fmt=off; fi
       EFIMODE="$(ui_radio "EFI handling for $ROOT_PART" \
         reuse "keep an existing FAT32 ESP (multiboot-safe)" "$_ef_reuse" \
         format "format a partition as ESP (destroys its contents)" "$_ef_fmt")" || die "aborted"
@@ -1237,6 +1239,12 @@ for _f in etc/locale.conf etc/vconsole.conf etc/hostname etc/hosts etc/kernel/cm
   fi
 done
 unset -v _f
+
+# Firmware boot entry (bootctl in the chroot cannot write EFI variables).
+if ! ensure_boot_entry "$EFI_PART"; then
+  printf '%s\n' "no firmware boot entry: Arch boots only via the \\EFI\\BOOT fallback (Windows may take over) — after first boot: sudo efibootmgr --create --disk $DISK --part ${EFI_PART##*[!0-9]} --label 'Linux Boot Manager' --loader '\\EFI\\systemd\\systemd-bootx64.efi'" \
+    >>/mnt/root/t14s-warnings.txt
+fi
 
 # Collected chroot warnings → finish screen + /root/t14s-post-install.txt.
 INSTALL_WARNINGS=""

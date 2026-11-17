@@ -1525,4 +1525,30 @@ grep -q 'chmod 0755 "$db"' "$ROOT/lib/50-packages.sh" \
   || fail "prefetch db dir must be traversable by pacman's download user (alpm sandbox)"
 rm -rf "$_pfx"; unset -v _pfx _o _pf_line _ps_line; unset -f _pfrun
 
+# Firmware boot entry: bootctl in the chroot writes no EFI variables, so the
+# host creates "Linux Boot Manager" for the chosen ESP and drops stale ones.
+_efi_fx='BootCurrent: 001C
+BootOrder: 0003,0001,0002,001C
+Boot0001* Linux Boot Manager	HD(1,GPT,0a1d6820-8fd4-47d9-be7c-79d7fdcf6c40,0x800,0x200000)/\EFI\systemd\systemd-bootx64.efi
+Boot0002* Fallback Linux Boot Manager	HD(1,GPT,0a1d6820-8fd4-47d9-be7c-79d7fdcf6c40,0x800,0x200000)/\EFI\systemd\systemd-boot-fallbackx64.efi
+Boot0003* Windows Boot Manager	HD(1,GPT,CC7AE317-8288-40F3-BFEE-A6983A51C9B5,0x800,0x578000)/\EFI\Microsoft\Boot\bootmgfw.efi
+Boot001C* NVMe0	VenMsg(bc7838d2-0f82-4d60-8316-c068ee79d25b,001c)'
+_hw() { bash -c 'warn(){ :; }; say(){ :; }; ok(){ :; }; source "$1"; shift; "$@"' _ "$ROOT/lib/30-hardware.sh" "$@"; }
+_o="$(_hw sdboot_plan cc7ae317-8288-40f3-bfee-a6983a51c9b5 <<<"$_efi_fx")"
+[[ $_o == $'delete 0001\ndelete 0002\ncreate' ]] || fail "stale Linux Boot Manager entries must go, Windows stays, new entry created: $_o"
+_o="$(_hw sdboot_plan 0A1D6820-8FD4-47D9-BE7C-79D7FDCF6C40 <<<"$_efi_fx")"
+[[ $_o == 'keep 0001' ]] || fail "an entry already on this ESP must be kept (fallback too), not recreated: $_o"
+[[ $(_hw sdboot_plan 11111111-2222-3333-4444-555555555555 <<<'BootOrder: 0000') == create ]] || fail "empty NVRAM must create"
+[[ $(_hw boot_order_front 0001 <<<"$_efi_fx") == 0001,0003,0002,001C ]] || fail "boot_order_front must move the entry first"
+_ebe="$(grep -n 'ensure_boot_entry "$EFI_PART"' "$ROOT/install.sh" | cut -d: -f1)"
+_cc="$(grep -n 'ok "chroot config complete"' "$ROOT/install.sh" | cut -d: -f1)"
+_iw="$(grep -n '^INSTALL_WARNINGS=""' "$ROOT/install.sh" | cut -d: -f1)"
+[[ -n $_ebe && -n $_cc && -n $_iw ]] && (( _cc < _ebe && _ebe < _iw )) \
+  || fail "install.sh must write the firmware entry after the chroot and before warnings are collected"
+grep -A3 'ensure_boot_entry "$EFI_PART"' "$ROOT/install.sh" | grep -q 't14s-warnings.txt' \
+  || fail "a missing firmware entry must be listed as an install warning"
+grep -B2 -A2 '_ef_reuse=on; _ef_fmt=off' "$ROOT/install.sh" | grep -q 'grep -qx vfat' \
+  || fail "MANUAL must default to reusing an existing FAT32 ESP (formatting kills Windows' loader)"
+unset -v _efi_fx _o _ebe _cc _iw; unset -f _hw
+
 echo "PASS: smoke.test.sh"
