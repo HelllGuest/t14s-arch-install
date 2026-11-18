@@ -385,8 +385,10 @@ echo '-kernel.unprivileged_userns_clone = 1' > /etc/sysctl.d/99-userns.conf
 
 stage 30 34 "services and snapshots"
 # services (firewalld; ufw masked inside configure_firewalld before first boot)
+# systemd-timesyncd: the preflight's `timedatectl set-ntp true` only affects the
+# ISO; without this the installed system never synchronizes its clock.
 systemctl enable NetworkManager apparmor firewalld bluetooth fstrim.timer reflector.timer \
-                 systemd-tmpfiles-clean.timer
+                 systemd-tmpfiles-clean.timer systemd-timesyncd.service
 
 
 # snapper config for / (handle pre-existing @snapshots mount) — non-fatal

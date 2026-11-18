@@ -282,6 +282,8 @@ if [[ -e /var/lib/t14s/flatpak-apps.done ]]; then PASS "first-boot Flatpak apps 
 elif systemctl is-enabled --quiet t14s-flatpak-apps.timer 2>/dev/null; then WARN "first-boot Flatpak apps still pending (timer enabled)"
 elif systemctl is-enabled --quiet t14s-flatpak-apps.service 2>/dev/null; then WARN "Flatpak first-boot uses the old WantedBy=multi-user oneshot (pre-876f083 install)"
 else SKIP "no t14s first-boot Flatpak unit"; fi
+[[ $(timedatectl show -p NTP --value 2>/dev/null) == yes ]] && PASS "NTP enabled (timedatectl)" \
+  || FAIL "NTP off: clock never synchronized — sudo timedatectl set-ntp true"
 nfailed=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
 (( nfailed == 0 )) && PASS "no failed system units" || FAIL "$nfailed failed unit(s): $(systemctl --failed --no-legend | awk '{print $2}' | tr '\n' ' ')"
 state=$(systemctl is-system-running 2>/dev/null)
