@@ -290,7 +290,7 @@ if systemctl is-enabled --quiet fail2ban.service 2>/dev/null; then
   if (( _f2b_unread )); then SKIP "fail2ban banaction: jail.d not readable (run as root)"
   else grep -qsE '^\s*banaction\s*=\s*firewallcmd' /etc/fail2ban/jail.d/*.local /etc/fail2ban/jail.local \
     && PASS "fail2ban bans through firewalld" \
-    || WARN "fail2ban uses Arch's iptables banaction (outside firewalld's nftables) — see lib/80-chroot-setup.sh 00-firewalld.local"
+    || WARN "fail2ban uses Arch's iptables banaction (outside firewalld's nftables) — see lib/chroot/12-secureboot-ssh-firewall.sh (00-firewalld.local)"
   fi
   unset _f _f2b_unread
 fi

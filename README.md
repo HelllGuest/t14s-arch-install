@@ -5,7 +5,8 @@ Hardened **Arch Linux** Stage A installer for:
 * **Lenovo ThinkPad T14s Gen 3 AMD** (type **21CQ / 21CR**; example MTM `21CRS1PU00`)
 * **Lenovo ThinkPad P15 Gen 1** (type **20SU**; Optimus NVIDIA Quadro)
 
-Curl-able orchestrator (`install.sh`) plus `lib/*.sh` modules. Interactive TUI
+Curl-able orchestrator (`install.sh`) plus `lib/*.sh` helper modules and
+`lib/steps/*.sh` wizard/install stages. Interactive TUI
 by default; unattended with answers + a secrets file. `HW_PROFILE=t14s|p15` is
 auto-detected from DMI (or set in answers). Firewall: **firewalld**
 (`nftables`, default zone `drop`; UFW masked if present). Optional ports:
@@ -639,16 +640,23 @@ NONINTERACTIVE VM runs auto-set `SKIP_THINKPAD_HW=Y`.
 Layout:
 
 ```text
-install.sh                 # thin orchestrator (curl target)
+install.sh                 # thin orchestrator (curl target): loader, globals, traps, stage list
 lib/00-common.sh           # colors, logging, die/say/ok/warn, yn helpers
-lib/10-ui.sh               # TUI layer
+lib/10-ui.sh               # TUI core: geometry, dialog/whiptail wrapper, console log level, die/on_exit
+lib/11-ui-theme.sh         # TUI colours (NEWT_COLORS, dialogrc per severity)
+lib/12-ui-screens.sh       # TUI screens: messages, yes/no, input, menus, checklists
+lib/13-ui-progress.sh      # install log + live progress (progress box, gauge)
 lib/20-answers.sh          # answers + secrets
 lib/30-hardware.sh         # DMI / ThinkPad helpers
 lib/40-disk.sh             # LUKS / Btrfs helpers
-lib/50-packages.sh         # package list stubs / helpers
+lib/50-packages.sh         # package lists, prefetch, pacman_tune (live ISO + target)
 lib/70-firewall.sh         # firewalld drop zone via firewall-offline-cmd; FW_* ports; mask ufw;
                            #   live reload only outside arch-chroot when firewall-cmd --state answers
-lib/80-chroot-setup.sh     # chroot body (deployed into the target)
+lib/80-chroot-setup.sh     # chroot entry (deployed into the target): helpers, then lib/chroot/* in order
+lib/chroot/01-base-config.sh … 12-secureboot-ssh-firewall.sh  # chroot stages (@@STAGE 0→100)
+lib/steps/01-preflight.sh  # stages, sourced by install.sh in this order at top level:
+lib/steps/02-welcome.sh … 12-review.sh       #   wizard steps 1-10 (no disk touched; DRYRUN exits in 12)
+lib/steps/20-install-disk.sh … 30-finish.sh  #   install: partition, LUKS/Btrfs, pacstrap, chroot, finish
 tests/                     # smoke + host-check; vm-run.sh + vm-bootstrap.sh / vm-dual-bootstrap.sh headless VM rehearsals
 ```
 
@@ -658,6 +666,15 @@ Local work (no GitHub fetch of `lib/`):
 T14S_LIB_DIR=./lib bash install.sh
 # or: bash install.sh   # auto-detects sibling lib/ next to this script
 ```
+
+Adding or reordering a stage: create `lib/steps/NN-name.sh` (same header as the
+others) and add it to the stage list at the end of `install.sh`. Chroot stages
+live in `lib/chroot/` and are listed in `lib/steps/23-install-chroot.sh` (the
+deploy list; the chroot sources them in name order). A new helper library goes
+in `lib/NN-name.sh` and the `for _lib in` list in `install.sh`. The smoke test
+fails if any of these lists and their directory differ or are out of order. Stage code runs at
+top level, so it shares globals with every other stage; helpers it defines for
+others belong in `lib/*.sh` instead.
 
 How `lib/` is loaded:
 
@@ -674,7 +691,7 @@ SHA cannot be resolved, the installer stops instead of mixing versions.
 
 ```bash
 bash -n install.sh
-bash -n lib/*.sh
+bash -n lib/*.sh lib/steps/*.sh lib/chroot/*.sh
 bash tests/smoke.test.sh
 bash tests/host-check.test.sh   # host-check.sh parsers (stubs, no host state)
 
@@ -694,8 +711,8 @@ GitHub Actions: smoke + shellcheck on push. Smoke includes a
 `T14S_DRYRUN=1` NONINTERACTIVE run against a whole-disk block device
 (no TTY; no writes past the DRYRUN exit; keymap via
 `T14S_IDENTITY_OVERRIDES` + `KEYMAP_DIR` fixture on Ubuntu runners).
-Curl one-liners still hit `install.sh`, which fetches `lib/*.sh` from the same
-repo/branch when no local `lib/` is present.
+Curl one-liners still hit `install.sh`, which fetches `lib/*.sh`, `lib/steps/*.sh` and
+`lib/chroot/*.sh` from the same commit when no local `lib/` is present.
 
 ## License
 

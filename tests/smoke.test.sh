@@ -12,15 +12,52 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 bash -n "$ROOT/install.sh" || fail "bash -n failed"
 [[ -d $ROOT/lib ]] || fail "missing lib/ (modular layout)"
 shopt -s nullglob
-for _lib in "$ROOT"/lib/*.sh; do
+for _lib in "$ROOT"/lib/*.sh "$ROOT"/lib/steps/*.sh "$ROOT"/lib/chroot/*.sh; do
   bash -n "$_lib" || fail "bash -n failed: $_lib"
 done
 unset -v _lib
 # Greps search orchestrator + modules. Live runs use ORCH_SH (not the concat).
 ORCH_SH="$ROOT/install.sh"
+# Stages exactly as install.sh sources them; lib/steps/ must hold no more, no less.
+mapfile -t STEPS < <(sed -n '/^for _t14s_step in/,/; do$/p' "$ORCH_SH" \
+  | tr ' ' '\n' | sed 's/;$//' | grep -E '^[0-9]{2}-[a-z0-9-]+\.sh$')
+(( ${#STEPS[@]} > 0 )) || fail "could not read the stage list from install.sh"
+[[ "$(printf '%s\n' "${STEPS[@]}")" == "$(cd "$ROOT/lib/steps" && ls -1 [0-9]*.sh)" ]] \
+  || fail "install.sh stage list and lib/steps/ differ (or are not in run order)"
+# curl one-liner path: _lib_path fetches lib/steps/* (subdir) from the same
+# base URL into the temp dir. file:// keeps this offline.
+_fetch="$(bash -c 'eval "$(awk "/^_lib_path\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$1")"
+  T14S_LIB_DIR="" T14S_BASE_URL="file://$2"; _lib_path steps/01-preflight.sh
+  cmp -s "$_LIB_PATH" "$2/lib/steps/01-preflight.sh" && echo same; rm -rf -- "$T14S_LIB_FETCH_DIR"' _ "$ORCH_SH" "$ROOT")"
+[[ $_fetch == same ]] || fail "curl path must fetch lib/steps/* into the fetch dir (got: $_fetch)"
+unset -v _fetch
+# Libraries as install.sh loads them: every lib/NN-*.sh except the chroot entry.
+mapfile -t LIBS < <(sed -n '/^for _lib in/,/; do$/p' "$ORCH_SH" | tr ' ' '\n' | sed 's/;$//' \
+  | grep -E '^[0-9]{2}-[a-z0-9-]+\.sh$')
+[[ "$(printf '%s\n' "${LIBS[@]}")" == "$(cd "$ROOT/lib" && ls -1 [0-9]*.sh | grep -vx 80-chroot-setup.sh)" ]] \
+  || fail "install.sh library list and lib/*.sh differ (or are not in load order)"
+UI_SH=$(mktemp)       # the TUI layer (10-13) in load order, for tests that source it
+trap 'rm -f "$UI_SH"' EXIT
+_ui=()
+for _l in "${LIBS[@]}"; do [[ $_l == 1[0-9]-ui*.sh ]] && _ui+=("$ROOT/lib/$_l"); done
+cat "${_ui[@]}" >"$UI_SH"
+unset -v _ui _l
 INSTALL_SH=$(mktemp)
-trap 'rm -f "$INSTALL_SH"' EXIT
-cat "$ROOT/install.sh" "$ROOT"/lib/*.sh >"$INSTALL_SH"
+WIZARD_SH=$(mktemp)   # install.sh + stages in run order: the code install.sh runs
+trap 'rm -f "$INSTALL_SH" "$WIZARD_SH" "${CHROOT_SH:-}" "$UI_SH"' EXIT
+cat "$ROOT/install.sh" "${STEPS[@]/#/$ROOT/lib/steps/}" >"$WIZARD_SH"
+# Chroot stages as lib/steps/23-install-chroot.sh deploys them; 80-chroot-setup.sh
+# sources /root/t14s-lib/chroot/[0-9]*.sh in glob order, so names must sort in run order.
+mapfile -t CHROOT_STAGES < <(sed -n '/^for _cs in/,/; do$/p' "$ROOT/lib/steps/23-install-chroot.sh" \
+  | tr ' ' '\n' | sed 's/;$//' | grep -E '^[0-9]{2}-[a-z0-9-]+\.sh$')
+(( ${#CHROOT_STAGES[@]} > 0 )) || fail "could not read the chroot stage list"
+[[ "$(printf '%s\n' "${CHROOT_STAGES[@]}")" == "$(cd "$ROOT/lib/chroot" && ls -1 [0-9]*.sh)" ]] \
+  || fail "deployed chroot stage list and lib/chroot/ differ (or are not in run order)"
+grep -q 'for _t14s_cstage in /root/t14s-lib/chroot/\[0-9\]\*.sh; do' "$ROOT/lib/80-chroot-setup.sh" \
+  || fail "80-chroot-setup.sh must source the deployed chroot stages"
+CHROOT_SH=$(mktemp)   # chroot entry + stages in run order: the code arch-chroot runs
+cat "$ROOT/lib/80-chroot-setup.sh" "${CHROOT_STAGES[@]/#/$ROOT/lib/chroot/}" >"$CHROOT_SH"
+cat "$WIZARD_SH" "$ROOT"/lib/*.sh "${CHROOT_STAGES[@]/#/$ROOT/lib/chroot/}" >"$INSTALL_SH"
 
 [[ -x "$ROOT/tests/host-check.sh" ]] && bash -n "$ROOT/tests/host-check.sh" \
   || fail "tests/host-check.sh missing, not executable, or bash -n failed"
@@ -45,7 +82,7 @@ grep -q 'pacman -Rns --noconfirm ufw' "$ROOT/lib/70-firewall.sh" \
   || fail "configure_firewalld must remove ufw package when present"
 ! grep -qE '(^|[[:space:]])ufw([[:space:]]|$)' "$ROOT/lib/50-packages.sh" \
   || fail "base packages must not include ufw"
-! grep -qE '\bUFW_(SYNCTHING|KDECONNECT)\b' "$ROOT/install.sh" "$ROOT/lib/70-firewall.sh" \
+! grep -qE '\bUFW_(SYNCTHING|KDECONNECT)\b' "$WIZARD_SH" "$ROOT/lib/70-firewall.sh" \
   || fail "UFW_* answer compat must be removed (FW_* only)"
 ! test -e "$ROOT/install.sh.monolithic" \
   || fail "install.sh.monolithic must be deleted (modular install.sh is canonical)"
@@ -82,14 +119,14 @@ if command -v unshare >/dev/null 2>&1 && unshare -rn true 2>/dev/null; then
   rm -rf -- "$_off_tmp"
   unset -v _off_tmp _off_err
 fi
-grep -q 'is-active --quiet firewalld' "$ROOT/lib/80-chroot-setup.sh" \
+grep -q 'is-active --quiet firewalld' "$CHROOT_SH" \
   || fail "selftest check_firewalld must prefer is-active"
-grep -q '70-firewall.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 70-firewall.sh"
-grep -q '80-chroot-setup.sh' "$ROOT/install.sh" || fail "orchestrator must deploy 80-chroot-setup.sh"
+grep -q '70-firewall.sh' "$WIZARD_SH" || fail "orchestrator must deploy 70-firewall.sh"
+grep -q '80-chroot-setup.sh' "$WIZARD_SH" || fail "orchestrator must deploy 80-chroot-setup.sh"
 grep -q 't14s_base_packages' "$INSTALL_SH" || fail "pacstrap must use t14s_base_packages"
-grep -q 'rm -rf /mnt/root/t14s-lib' "$ROOT/install.sh" \
+grep -q 'rm -rf /mnt/root/t14s-lib' "$WIZARD_SH" \
   || fail "cleanup must remove /mnt/root/t14s-lib"
-grep -q 'deployed lib/.*missing or empty' "$ROOT/install.sh" \
+grep -q 'deployed lib/.*missing or empty' "$WIZARD_SH" \
   || fail "_deploy_lib must reject empty modules"
 grep -q 'systemctl mask ufw' "$INSTALL_SH" \
   || fail "must mask ufw when enabling firewalld"
@@ -289,7 +326,7 @@ grep -q 'run_gauge "chroot config' "$INSTALL_SH" \
   || fail "chroot must use run_gauge"
 
 # progress_filter: pacman/curl/stage lines → monotonic gauge percent per band
-python3 - "$ROOT/lib/80-chroot-setup.sh" <<'PY' || fail "chroot stage markers must be ascending, 0→100, contiguous"
+python3 - "$CHROOT_SH" <<'PY' || fail "chroot stage markers must be ascending, 0→100, contiguous"
 import re, sys
 t = open(sys.argv[1]).read()
 st = [(int(a), int(b)) for a, b in re.findall(r'^stage (\d+) (\d+) "', t, re.M)]
@@ -607,7 +644,7 @@ case "$*" in
 esac
 STUB
 chmod +x "$_pk/bin/pacman"
-_chroot_body="$(cat "$ROOT/lib/80-chroot-setup.sh")"
+_chroot_body="$(cat "$CHROOT_SH")"
 PK_DIR="$_pk" PATH="$_pk/bin:$PATH" bash -c '
   set -euo pipefail
   eval "$(printf "%s\n" "$1" | awk "/^WARN_FILE=/{f=1} f; /^source \\/root\\/t14s-lib.sh/{exit}" | grep -v "^source ")"
@@ -663,7 +700,7 @@ grep -q 'install -m 600 "$LOG" /mnt/var/log/t14s-install.log' "$INSTALL_SH" \
   || fail "install log must be kept on the target"
 grep -q 'INSTALL COMPLETE with warnings' "$INSTALL_SH" || fail "finish screen must surface warnings"
 # Flatpak apps are deferred to a first-boot oneshot (not downloaded in chroot).
-_chr="$(cat "$ROOT/lib/80-chroot-setup.sh")"
+_chr="$(cat "$CHROOT_SH")"
 grep -qE '^\s*flatpak install --system .*\$\{_fp_apps' <<<"$_chr" \
   && fail "chroot must not download Flatpak apps (first-boot service does)" || true
 grep -q 'systemctl enable NetworkManager-wait-online.service t14s-flatpak-apps.timer' <<<"$_chr" \
@@ -782,7 +819,7 @@ grep -q 'yn_canon' "$INSTALL_SH" || fail "must canonicalize flags to Y/N"
 grep -q 'chmod 600' "$INSTALL_SH" || fail "answers_save / secrets must chmod 600"
 grep -q 'must be mode 0600' "$INSTALL_SH" || fail "secrets_load must require mode 0600"
 # Chroot body must define yn_on and not leave stray ] after yn_on calls
-python3 - "$ROOT/lib/80-chroot-setup.sh" <<'PY' || fail "chroot yn_on gates broken"
+python3 - "$CHROOT_SH" <<'PY' || fail "chroot yn_on gates broken"
 from pathlib import Path
 import re, sys, subprocess, tempfile
 body = Path(sys.argv[1]).read_text()
@@ -885,14 +922,14 @@ grep -q 'Setup Mode' "$ROOT/README.md" || fail "README SB enroll must mention Se
 grep -q 'FORMAT_EFI=1' "$ROOT/README.md" || fail "README must note CLEAN_ESP ignored when formatting"
 grep -q 'dead entries' "$INSTALL_SH" || fail "CLEAN_ESP_ARCH=N must warn about dead boot entries"
 # umask must not leak into arch-chroot (regression: /etc/locale.conf 0600 → LANG unset).
-grep -vE '^\s*#' "$ROOT/install.sh" | grep -qE '^umask ' \
+grep -vE '^\s*#' "$WIZARD_SH" | grep -qE '^umask ' \
   && fail "script-wide umask leaks into arch-chroot; scope it in a subshell" || true
-grep -qx 'umask 022' "$ROOT/lib/80-chroot-setup.sh" \
+grep -qx 'umask 022' "$CHROOT_SH" \
   || fail "chroot script must pin umask 022"
 grep -q 'fmask=0077' "$INSTALL_SH" || fail "ESP fstab must use fmask/dmask=0077 (random-seed)"
 # Chroot must not delete pacstrap's kernels/ucode before mkinitcpio -P
 # (regression: "'/boot/vmlinuz-linux-lts' must be readable").
-awk '/^mkinitcpio -P/{exit} {print}' "$ROOT/lib/80-chroot-setup.sh" \
+awk '/^mkinitcpio -P/{exit} {print}' "$CHROOT_SH" \
   | grep -vE '^\s*#' \
   | grep -qE 'rm .*(/boot/vmlinuz|/boot/(amd|intel)-ucode\.img)' \
   && fail "chroot removes /boot/vmlinuz* or *-ucode.img before mkinitcpio -P" || true
@@ -1006,13 +1043,13 @@ done
 unset -v _c
 # The prompt re-asks; an answers-file value gets a box (a bare warn line there
 # was drawn over by the Review screen before logging even started).
-grep -A6 'REFLECTOR_COUNTRY="$(ui_input' "$ORCH_SH" | grep -q 'valid_reflector_country' \
+grep -A6 'REFLECTOR_COUNTRY="$(ui_input' "$WIZARD_SH" | grep -q 'valid_reflector_country' \
   || fail "reflector country prompt must re-ask on invalid input"
-grep -A3 '^# Reflector country sanitize' "$ORCH_SH" | grep -q 'ui_warn' \
+grep -A3 '^# Reflector country sanitize' "$WIZARD_SH" | grep -q 'ui_warn' \
   || fail "invalid REFLECTOR_COUNTRY from answers must be shown (ui_warn)"
 # Live refresh failure: reason + consequence in a box (a bare warn line was
 # drawn over by the download gauge at once); never "skipped" on that path.
-_rb="$(awk '/^ML_TMP="\$\(mktemp\)"$/{f=1} f{print} f&&/^unset -v _reflector_args$/{exit}' "$ORCH_SH")"
+_rb="$(awk '/^ML_TMP="\$\(mktemp\)"$/{f=1} f{print} f&&/^unset -v _reflector_args$/{exit}' "$WIZARD_SH")"
 grep -q '124) _rfl_why="timed out' <<<"$_rb" || fail "reflector failure must name a timeout"
 grep -q '(( NONINTERACTIVE )) || ui_warn "Mirror refresh' <<<"$_rb" || fail "reflector failure must be shown interactively"
 grep -q 'reflector skipped, timed out' <<<"$_rb" && fail "failure path must not say 'skipped'"
@@ -1232,8 +1269,22 @@ rm -rf "$_tmp"
   || fail "both answers and secrets parsers must strip trailing CR"
 grep -q 'plain | dialog | whiptail) UI=\$T14S_UI' "$INSTALL_SH" \
   || fail "T14S_UI must be limited to plain|dialog|whiptail"
-grep -q "trap 'die \"failed at line \$LINENO (exit \$?): \$BASH_COMMAND\"" "$INSTALL_SH" \
-  || fail "ERR trap must report the failed command"
+grep -qF "trap '_on_err \"\$?\" \"\$LINENO\" \"\$BASH_COMMAND\"' ERR" "$ORCH_SH" \
+  || fail "ERR trap must pass \$? first to _on_err (a \$(…) in the trap would reset it)"
+# Code lives in lib/steps/: a failure must name the stage file; install.sh itself
+# runs from a pipe on the curl path (/dev/fd/N) and must still say install.sh.
+_oe="$(awk '/^_on_err\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ORCH_SH")"
+[[ -n $_oe ]] || fail "could not extract _on_err"
+_st="$(mktemp -d)"; printf ': first line\n(exit 3)\n' >"$_st/22-x.sh"
+_pre='set -euo pipefail; die() { echo "$1 rc=$2"; exit 1; }'
+_trap="trap '_on_err \"\$?\" \"\$LINENO\" \"\$BASH_COMMAND\"' ERR"
+_msg="$(bash -c "$_pre"$'\n'"$_oe"$'\n'"$_trap"$'\n''source "$1"' _ "$_st/22-x.sh" 2>&1 || true)"
+[[ $_msg == "failed at 22-x.sh:2 (exit 3): ( exit 3 ) rc=3" ]] \
+  || fail "ERR inside a stage must name file:line and keep the exit code, got: $_msg"
+_msg="$(bash <(printf '%s\n' "$_pre" "$_oe" "$_trap" '(exit 5)') 2>&1 || true)"
+[[ $_msg == "failed at install.sh:"*" (exit 5): ( exit 5 ) rc=5" ]] \
+  || fail "ERR in install.sh run from a pipe must say install.sh, got: $_msg"
+rm -rf -- "$_st"; unset -v _st _msg _oe _pre _trap
 grep -qF "trap 'on_exit \$?' EXIT" "$ORCH_SH" \
   || fail "EXIT trap must route through on_exit (backstop for failures inside helpers)"
 
@@ -1377,13 +1428,13 @@ unset -f _run_exit
 grep -q 'rd.luks.options=discard' "$INSTALL_SH" || fail "cmdline must pass discards through LUKS (fstrim.timer)"
 grep -q 'lsm=landlock,lockdown,yama,integrity,apparmor,bpf' "$INSTALL_SH" \
   || fail "cmdline must enable AppArmor via lsm="
-! grep -v '^[[:space:]]*#' "$ROOT/lib/80-chroot-setup.sh" | grep -q 'security=apparmor' || fail "security= is deprecated; use lsm="
+! grep -v '^[[:space:]]*#' "$CHROOT_SH" | grep -q 'security=apparmor' || fail "security= is deprecated; use lsm="
 while IFS= read -r _h; do
   if [[ $_h == *plymouth* ]]; then
     [[ ${_h%%plymouth*} != *sd-encrypt* ]] || fail "plymouth hook must precede sd-encrypt: $_h"
   fi
-done < <(grep -o "HOOKS=([^)]*)" "$ROOT/lib/80-chroot-setup.sh")
-grep -q 'HOOKS=([^)]*plymouth sd-encrypt' "$ROOT/lib/80-chroot-setup.sh" \
+done < <(grep -o "HOOKS=([^)]*)" "$CHROOT_SH")
+grep -q 'HOOKS=([^)]*plymouth sd-encrypt' "$CHROOT_SH" \
   || fail "missing plymouth HOOKS variant"
 
 # Avahi needs the mdns service in the drop zone (replies are not conntracked).
@@ -1415,9 +1466,9 @@ unset -f _fwrun
 _st="$(awk '/cat > \/usr\/local\/bin\/t14s-selftest <<.ST.$/{f=1;next} f&&/^ST$/{exit} f' "$INSTALL_SH")"
 grep -q 'check intel_pstate' <<<"$_st" || fail "selftest must check intel_pstate on Intel (P15)"
 grep -q 'GenuineIntel' <<<"$_st" || fail "selftest cpufreq check must branch on CPU vendor"
-grep -q 'CMDLINE_HINT="grep -E .intel_iommu|nvidia_drm' "$ORCH_SH" \
+grep -q 'CMDLINE_HINT="grep -E .intel_iommu|nvidia_drm' "$WIZARD_SH" \
   || fail "P15 finish screen must check intel_iommu/nvidia_drm, not amd_*"
-! grep -q 'Verify after boot: lscpu | grep -i ryzen' "$ORCH_SH" \
+! grep -q 'Verify after boot: lscpu | grep -i ryzen' "$WIZARD_SH" \
   || fail "finish screen CPU hint must be profile-aware"
 
 # Interrupt (INT/TERM) reports and exits without a dialog to dismiss.
@@ -1434,7 +1485,7 @@ grep -q 'ERR interrupted (signal 2)' <<<"$_err" || fail "interrupt must be repor
 rm -rf "$_tmp"
 
 # reflector.conf: shlex-split per line, so a spaced country must stay one arg.
-_rf="$(awk '/^# reflector mirrors/{f=1;next} f{print} f&&/^} > \/etc\/xdg\/reflector\/reflector.conf$/{exit}' "$ROOT/lib/80-chroot-setup.sh")"
+_rf="$(awk '/^# reflector mirrors/{f=1;next} f{print} f&&/^} > \/etc\/xdg\/reflector\/reflector.conf$/{exit}' "$CHROOT_SH")"
 [[ -n $_rf ]] || fail "could not extract reflector.conf writer"
 _rfout="$(REFLECTOR_COUNTRY='United States,DE' bash -c "${_rf%>*}")"
 python3 -c 'import shlex,sys; a=[t for l in sys.stdin for t in shlex.split(l, comments=True)]; i=a.index("--country"); sys.exit(0 if a[i+1]=="United States,DE" else 1)' <<<"$_rfout" \
@@ -1442,9 +1493,9 @@ python3 -c 'import shlex,sys; a=[t for l in sys.stdin for t in shlex.split(l, co
 
 # Minor: one install log; ESP size in the step text; env toggles accept y/yes/on.
 [[ $(grep -c '^LOG="\$(mktemp' "$ORCH_SH") -eq 1 ]] || fail "install.sh must create the log file once"
-! grep -q '2G ESP + LUKS' "$ORCH_SH" || fail "partition step text must use ESP_MB"
-grep -q '_env_on "${T14S_ALLOW_NON_ISO:-0}"' "$ORCH_SH" || fail "T14S_ALLOW_NON_ISO must accept y/yes/on"
-grep -q '_env_on "${T14S_POST_HOOK_I_UNDERSTAND:-0}"' "$ORCH_SH" \
+! grep -q '2G ESP + LUKS' "$WIZARD_SH" || fail "partition step text must use ESP_MB"
+grep -q '_env_on "${T14S_ALLOW_NON_ISO:-0}"' "$WIZARD_SH" || fail "T14S_ALLOW_NON_ISO must accept y/yes/on"
+grep -q '_env_on "${T14S_POST_HOOK_I_UNDERSTAND:-0}"' "$WIZARD_SH" \
   || fail "T14S_POST_HOOK_I_UNDERSTAND must accept y/yes/on"
 
 # TUI geometry scales with the real console (pty via script(1)) and never
@@ -1453,7 +1504,7 @@ if command -v script >/dev/null 2>&1; then
   _geo() { # rows cols [redirect] -> "H W LH MH MW"
     local cmd='source "$1"; ui_geometry; echo "GEO $H $W $LH $MH $MW"'
     [[ ${3:-} == redirect ]] && cmd='source "$1"; { ui_geometry; echo "GEO $H $W $LH $MH $MW" >&3; } 3>&1 </dev/null >/dev/null 2>&1'
-    script -qec "stty rows $1 cols $2; bash -c '$cmd' _ '$ROOT/lib/10-ui.sh'" /dev/null 2>/dev/null \
+    script -qec "stty rows $1 cols $2; bash -c '$cmd' _ '$UI_SH'" /dev/null 2>/dev/null \
       | tr -d '\r' | sed -n 's/^GEO //p'
   }
   [[ $(_geo 24 80) == "18 72 10 14 72" ]] || fail "80x24 geometry: $(_geo 24 80)"
@@ -1471,48 +1522,48 @@ fi
 # whiptail cuts long msgbox/yesno text unless --scrolltext (REVIEW is 30+ lines),
 # but --scrolltext moves focus into the text where Enter does nothing (every box
 # looked frozen on the ISO console): scroll only bodies taller than the screen.
-_um="$(awk '/^ui_msg\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh")"
+_um="$(awk '/^ui_msg\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$UI_SH")"
 grep -q 'msg_overflows "$show"' <<<"$_um" && grep -q 'scroll=(--scrolltext)' <<<"$_um" \
   || fail "whiptail msgbox must use --scrolltext only when the body overflows"
-_uy="$(awk '/^ui_yesno\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh")"
+_uy="$(awk '/^ui_yesno\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$UI_SH")"
 grep -q 'msg_overflows "$folded"' <<<"$_uy" && grep -q 'extra+=(--scrolltext)' <<<"$_uy" \
   || fail "whiptail yesno must use --scrolltext only when the body overflows"
-grep -qE '\[\[ \$UI == whiptail \]\] && (scroll=|extra\+=)\(--scrolltext\)' "$ROOT/lib/10-ui.sh" \
+grep -qE '\[\[ \$UI == whiptail \]\] && (scroll=|extra\+=)\(--scrolltext\)' "$UI_SH" \
   && fail "unconditional whiptail --scrolltext is back (Enter ignored on every box)"
 # msg_overflows: lines + 6 rows must fit XH.
-_mo() { bash -c 'source "$1"; XH=$2; msg_overflows "$(seq 1 "$3")"' _ "$ROOT/lib/10-ui.sh" "$1" "$2"; }
+_mo() { bash -c 'source "$1"; XH=$2; msg_overflows "$(seq 1 "$3")"' _ "$UI_SH" "$1" "$2"; }
 _mo 20 14 && fail "14 lines fit a 20-row box (14+6)"
 _mo 20 15 || fail "15 lines overflow a 20-row box"
 unset -f _mo
 # list_height: whiptail shows only H - list - 6 prompt rows (the key hint under
 # every prompt was cut); dialog keeps LH and shrinks its list itself.
-_lh() { bash -c 'source "$1"; UI=$2 H=37 W=$3 LH=29; list_height "$4"' _ "$ROOT/lib/10-ui.sh" "$@"; }
+_lh() { bash -c 'source "$1"; UI=$2 H=37 W=$3 LH=29; list_height "$4"' _ "$UI_SH" "$@"; }
 [[ $(_lh whiptail 120 $'prompt\n\nhint') == 28 ]] || fail "whiptail list must leave room for prompt+blank+hint"
 [[ $(_lh dialog 120 $'prompt\n\nhint') == 29 ]] || fail "dialog list height must stay LH"
 [[ $(_lh whiptail 60 "$(printf 'x%.0s' $(seq 1 200))") == 27 ]] || fail "wrapped prompt rows must be counted (200 cols / 54)"
 unset -f _lh
 for _f in ui_menu ui_radio ui_checklist; do
-  awk "/^${_f}\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$ROOT/lib/10-ui.sh" | grep -q 'list_height "' \
+  awk "/^${_f}\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$UI_SH" | grep -q 'list_height "' \
     || fail "$_f must size its list with list_height"
 done
 unset -v _f
 # Kernel messages tear the TUI on a VT: muted while it runs, restored first on exit.
-awk '/^bootstrap_ui\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh" | grep -q 'ui_mute_console' \
+awk '/^bootstrap_ui\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$UI_SH" | grep -q 'ui_mute_console' \
   || fail "bootstrap_ui must mute kernel console messages"
 for _f in die on_exit cleanup_ui; do
-  awk "/^${_f}\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$ROOT/lib/10-ui.sh" | sed -n 2,4p | grep -q 'ui_restore_console' \
+  awk "/^${_f}\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$UI_SH" | sed -n 2,4p | grep -q 'ui_restore_console' \
     || fail "$_f must restore the console log level first"
 done
 unset -v _f
 # Off a VT (this test's terminal) the console level is never touched.
-[[ -z $(bash -c 'source "$1"; ui_mute_console; printf %s "${UI_PRINTK_SAVED:-}"' _ "$ROOT/lib/10-ui.sh") ]] \
+[[ -z $(bash -c 'source "$1"; ui_mute_console; printf %s "${UI_PRINTK_SAVED:-}"' _ "$UI_SH") ]] \
   || fail "ui_mute_console must only act on a Linux VT"
 # whiptail (ISO default) ignores Esc: its hints must not promise it.
-_wh="$(awk '/^if \[\[ \$UI == whiptail \]\]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$ROOT/install.sh")"
+_wh="$(awk '/^if \[\[ \$UI == whiptail \]\]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$WIZARD_SH")"
 grep -q 'TUI_HINT_RADIO=' <<<"$_wh" && ! grep -q 'Esc' <<<"$_wh" \
   || fail "whiptail hints must say Tab to Abort, not Esc"
 # whiptail long steps: clear the last box before streaming live output.
-awk '/^run_progress\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh" | grep -qF "\e[H\e[2J" \
+awk '/^run_progress\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$UI_SH" | grep -qF "\e[H\e[2J" \
   || fail "run_progress must clear the stale whiptail box"
 unset -v _um _uy
 
@@ -1544,17 +1595,17 @@ grep -qxF '/dev/nvme0n1p2|16M     empty       Microsoft reserved' <<<"$_menu" \
 ! grep -q 'x20\|cryptroot\|953.9G' <<<"$_menu" || fail "menu must list partitions only, unescaped: $_menu"
 _model="$(PATH="$_tmp/bin:$PATH" bash -c 'source "$1"; IFS=$'"'"'\x1f'"'"' read -r s m < <(lsblk_rows /dev/nvme0n1 SIZE MODEL); echo "$s|$m"' _ "$ROOT/lib/00-common.sh")"
 [[ $_model == '953.9G|SAMSUNG MZVL21T0HCLR-00BL7' ]] || fail "disk model must keep spaces: $_model"
-! grep -q 'dnro SIZE,MODEL\|prno TYPE,PATH' "$ORCH_SH" "$ROOT/lib/00-common.sh" || fail "menus must not use lsblk -r (escapes spaces)"
+! grep -q 'dnro SIZE,MODEL\|prno TYPE,PATH' "$WIZARD_SH" "$ROOT/lib/00-common.sh" || fail "menus must not use lsblk -r (escapes spaces)"
 rm -rf "$_tmp"; unset -v _menu _model
 
 # msg_height counts the last (unterminated) line: 2 lines + 6 rows overhead.
 [[ $(bash -c 'source "$1"; MH=1 H=50 XH=50; msg_height "a
-b"' _ "$ROOT/lib/10-ui.sh") == 8 ]] || fail "msg_height must count the final line"
+b"' _ "$UI_SH") == 8 ]] || fail "msg_height must count the final line"
 
 # The erase / manual-layout screens must fit an 80x24 console (message box
 # limit 20 rows = 14 text rows): badge 2 + intro + table (header, disk, parts).
 for _scr in 'ui_critical "AUTO mode ERASES' 'ui_info "Manual partitioning on'; do
-  _n="$(awk -v s="$_scr" 'index($0, s){f=1} f{n++} f&&/^\$\(lsblk -o NAME/{print n; exit}' "$ORCH_SH")"
+  _n="$(awk -v s="$_scr" 'index($0, s){f=1} f{n++} f&&/^\$\(lsblk -o NAME/{print n; exit}' "$WIZARD_SH")"
   [[ -n $_n ]] || fail "could not find screen: $_scr"
   (( _n - 1 <= 4 )) || fail "screen '$_scr' has $(( _n - 1 )) intro lines; keep ≤4 so a 5-partition table fits 80x24"
 done
@@ -1580,10 +1631,10 @@ grep -q -- "-Syw --noconfirm --dbpath .* --cachedir $_pfx/cache -- base linux" "
 rm -f "$_pfx/calls"
 _o="$(PF_OK_AT=99 PREFETCH_TRIES=3 _pfrun)" && fail "prefetch must fail after the last attempt" || true
 [[ $(wc -l <"$_pfx/calls") -eq 3 ]] && grep -q 'giving up' <<<"$_o" || fail "must stop after PREFETCH_TRIES and say so: $_o"
-_pf_line="$(grep -n 'prefetch_pkgs /mnt/var/cache/pacman/pkg' "$ROOT/install.sh" | cut -d: -f1)"
-_ps_line="$(grep -n 'pacstrap -K /mnt' "$ROOT/install.sh" | head -1 | cut -d: -f1)"
+_pf_line="$(grep -n 'prefetch_pkgs /mnt/var/cache/pacman/pkg' "$WIZARD_SH" | cut -d: -f1)"
+_ps_line="$(grep -n 'pacstrap -K /mnt' "$WIZARD_SH" | head -1 | cut -d: -f1)"
 [[ -n $_pf_line && -n $_ps_line ]] && (( _pf_line < _ps_line )) || fail "install.sh must prefetch before pacstrap"
-grep -A2 'prefetch_pkgs /mnt/var/cache/pacman/pkg' "$ROOT/install.sh" | grep -q '|| die' \
+grep -A2 'prefetch_pkgs /mnt/var/cache/pacman/pkg' "$WIZARD_SH" | grep -q '|| die' \
   || fail "a failed prefetch must stop before pacstrap touches the root"
 grep -q 'chmod 0755 "$db"' "$ROOT/lib/50-packages.sh" \
   || fail "prefetch db dir must be traversable by pacman's download user (alpm sandbox)"
@@ -1604,14 +1655,14 @@ _o="$(_hw sdboot_plan 0A1D6820-8FD4-47D9-BE7C-79D7FDCF6C40 <<<"$_efi_fx")"
 [[ $_o == 'keep 0001' ]] || fail "an entry already on this ESP must be kept (fallback too), not recreated: $_o"
 [[ $(_hw sdboot_plan 11111111-2222-3333-4444-555555555555 <<<'BootOrder: 0000') == create ]] || fail "empty NVRAM must create"
 [[ $(_hw boot_order_front 0001 <<<"$_efi_fx") == 0001,0003,0002,001C ]] || fail "boot_order_front must move the entry first"
-_ebe="$(grep -n 'ensure_boot_entry "$EFI_PART"' "$ROOT/install.sh" | cut -d: -f1)"
-_cc="$(grep -n 'ok "chroot config complete"' "$ROOT/install.sh" | cut -d: -f1)"
-_iw="$(grep -n '^INSTALL_WARNINGS=""' "$ROOT/install.sh" | cut -d: -f1)"
+_ebe="$(grep -n 'ensure_boot_entry "$EFI_PART"' "$WIZARD_SH" | cut -d: -f1)"
+_cc="$(grep -n 'ok "chroot config complete"' "$WIZARD_SH" | cut -d: -f1)"
+_iw="$(grep -n '^INSTALL_WARNINGS=""' "$WIZARD_SH" | cut -d: -f1)"
 [[ -n $_ebe && -n $_cc && -n $_iw ]] && (( _cc < _ebe && _ebe < _iw )) \
   || fail "install.sh must write the firmware entry after the chroot and before warnings are collected"
-grep -A3 'ensure_boot_entry "$EFI_PART"' "$ROOT/install.sh" | grep -q 't14s-warnings.txt' \
+grep -A3 'ensure_boot_entry "$EFI_PART"' "$WIZARD_SH" | grep -q 't14s-warnings.txt' \
   || fail "a missing firmware entry must be listed as an install warning"
-grep -B2 -A2 '_ef_reuse=on; _ef_fmt=off' "$ROOT/install.sh" | grep -q 'grep -qx vfat' \
+grep -B2 -A2 '_ef_reuse=on; _ef_fmt=off' "$WIZARD_SH" | grep -q 'grep -qx vfat' \
   || fail "MANUAL must default to reusing an existing FAT32 ESP (formatting kills Windows' loader)"
 unset -v _efi_fx _o _ebe _cc _iw; unset -f _hw
 

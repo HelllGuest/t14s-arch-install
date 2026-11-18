@@ -53,7 +53,7 @@ valid_hostname() {
 }
 
 # reflector --country: names or codes, comma-separated. Letters, spaces and
-# commas only (lib/80-chroot-setup.sh writes it single-quoted into reflector.conf).
+# commas only (lib/chroot/06-zram-sysctl-mirrors.sh writes it single-quoted into reflector.conf).
 valid_reflector_country() {
   [[ $1 =~ ^[A-Za-z][A-Za-z\ ,]*$ ]]
 }

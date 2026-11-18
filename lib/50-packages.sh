@@ -2,8 +2,8 @@
 # 50-packages.sh — part of HelllGuest/t14s-arch-install
 # shellcheck shell=bash
 
-# Package list assembly. pacstrap orchestration stays in install.sh.
-# pacman_tune() is provided by 10-ui.sh / 00-common.
+# Package list assembly, prefetch and pacman_tune. pacstrap itself runs in
+# lib/steps/22-install-base.sh.
 
 t14s_base_packages() {
   # Populates BASE_PKGS; call after UCODE and INSTALL_LINUX_STABLE / PLYMOUTH are set.
@@ -62,4 +62,30 @@ prefetch_pkgs() {
   done
   rm -rf -- "$db"
   return 1
+}
+
+# Tune a pacman.conf in place (live ISO and target; shipped into the chroot via
+# declare -f). $1 conf, $2 ParallelDownloads, $3 Y = enable [multilib].
+#   * no XferCommand (it serializes downloads and ignores ParallelDownloads)
+#   * DisableDownloadTimeout (slow mirrors stall instead of aborting)
+#   * Color + ILoveCandy, VerbosePkgLists, CheckSpace
+pacman_tune() {
+  local conf=$1 par=${2:-10} multilib=${3:-N}
+  [[ -f $conf ]] || return 1
+  sed -i '/^XferCommand[[:space:]]*=/d' "$conf"
+  if grep -qE '^#?ParallelDownloads' "$conf"; then
+    sed -i -E "s/^#?ParallelDownloads.*/ParallelDownloads = ${par}/" "$conf"
+  else
+    sed -i "/^\\[options\\]/a ParallelDownloads = ${par}" "$conf"
+  fi
+  sed -i -E 's/^#(Color|VerbosePkgLists|CheckSpace)[[:space:]]*$/\1/' "$conf"
+  grep -q '^Color' "$conf" || sed -i '/^\[options\]/a Color' "$conf"
+  grep -q '^ILoveCandy' "$conf" || sed -i '/^Color/a ILoveCandy' "$conf"
+  grep -q '^DisableDownloadTimeout' "$conf" \
+    || sed -i '/^\[options\]/a DisableDownloadTimeout' "$conf"
+  if [[ $multilib == Y ]]; then
+    # Only [multilib] and its Include line — never [multilib-testing].
+    sed -i '/^#\[multilib\]$/{s/^#//;n;s/^#Include/Include/}' "$conf"
+  fi
+  return 0
 }
