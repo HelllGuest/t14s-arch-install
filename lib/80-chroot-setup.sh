@@ -1024,6 +1024,13 @@ if yn_on "${INSTALL_FAIL2BAN}"; then
 [sshd]
 enabled = true
 FB
+    # Arch's default banaction is iptables-multiport (legacy iptables), outside
+    # the nftables ruleset firewalld manages; ban through firewalld instead.
+    cat > /etc/fail2ban/jail.d/00-firewalld.local <<'FB'
+[DEFAULT]
+banaction = firewallcmd-rich-rules
+banaction_allports = firewallcmd-allports
+FB
     systemctl enable fail2ban.service
   fi
 fi

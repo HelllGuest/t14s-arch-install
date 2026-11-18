@@ -735,6 +735,7 @@ grep -q 'T14S_POST_HOOK_I_UNDERSTAND' "$INSTALL_SH" \
   || fail "post-hook NONINTERACTIVE must require explicit opt-in"
 grep -q 'mdns_minimal' "$INSTALL_SH" || fail "avahi path must patch nsswitch mdns_minimal"
 grep -q 'jail.d/sshd.local' "$INSTALL_SH" || fail "fail2ban must enable sshd jail"
+grep -q 'banaction = firewallcmd-rich-rules' "$INSTALL_SH" || fail "fail2ban must ban through firewalld"
 grep -q 'systemd-tmpfiles-clean.timer systemd-timesyncd.service' "$INSTALL_SH" || fail "installed system must enable systemd-timesyncd"
 grep -q 'using DISK from answers' "$INSTALL_SH" \
   || fail "NONINTERACTIVE must honor DISK from answers"

@@ -284,6 +284,16 @@ elif systemctl is-enabled --quiet t14s-flatpak-apps.service 2>/dev/null; then WA
 else SKIP "no t14s first-boot Flatpak unit"; fi
 [[ $(timedatectl show -p NTP --value 2>/dev/null) == yes ]] && PASS "NTP enabled (timedatectl)" \
   || FAIL "NTP off: clock never synchronized — sudo timedatectl set-ntp true"
+if systemctl is-enabled --quiet fail2ban.service 2>/dev/null; then
+  _f2b_unread=0
+  for _f in /etc/fail2ban/jail.d/*.local; do [[ -e $_f && ! -r $_f ]] && _f2b_unread=1; done
+  if (( _f2b_unread )); then SKIP "fail2ban banaction: jail.d not readable (run as root)"
+  else grep -qsE '^\s*banaction\s*=\s*firewallcmd' /etc/fail2ban/jail.d/*.local /etc/fail2ban/jail.local \
+    && PASS "fail2ban bans through firewalld" \
+    || WARN "fail2ban uses Arch's iptables banaction (outside firewalld's nftables) — see lib/80-chroot-setup.sh 00-firewalld.local"
+  fi
+  unset _f _f2b_unread
+fi
 nfailed=$(systemctl --failed --no-legend 2>/dev/null | wc -l)
 (( nfailed == 0 )) && PASS "no failed system units" || FAIL "$nfailed failed unit(s): $(systemctl --failed --no-legend | awk '{print $2}' | tr '\n' ' ')"
 state=$(systemctl is-system-running 2>/dev/null)
