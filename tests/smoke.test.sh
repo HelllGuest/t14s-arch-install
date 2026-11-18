@@ -992,10 +992,31 @@ extract_fn() {
   ' "$INSTALL_SH"
 }
 # shellcheck disable=SC1090
-source <(for fn in valid_hostname valid_username valid_timezone valid_locale valid_keymap; do
+source <(for fn in valid_hostname valid_username valid_timezone valid_locale valid_keymap valid_reflector_country; do
   extract_fn "$fn"
   echo
 done)
+# reflector --country is written single-quoted into reflector.conf (chroot).
+for _c in DE DE,NL "United States" "Germany, France"; do
+  valid_reflector_country "$_c" || fail "reflector country '$_c' should pass"
+done
+for _c in "DE;rm" "DE'x" '$(id)' "1DE" "DE-NL" ""; do
+  valid_reflector_country "$_c" && fail "reflector country '$_c' should fail" || true
+done
+unset -v _c
+# The prompt re-asks; an answers-file value gets a box (a bare warn line there
+# was drawn over by the Review screen before logging even started).
+grep -A6 'REFLECTOR_COUNTRY="$(ui_input' "$ORCH_SH" | grep -q 'valid_reflector_country' \
+  || fail "reflector country prompt must re-ask on invalid input"
+grep -A3 '^# Reflector country sanitize' "$ORCH_SH" | grep -q 'ui_warn' \
+  || fail "invalid REFLECTOR_COUNTRY from answers must be shown (ui_warn)"
+# Live refresh failure: reason + consequence in a box (a bare warn line was
+# drawn over by the download gauge at once); never "skipped" on that path.
+_rb="$(awk '/^ML_TMP="\$\(mktemp\)"$/{f=1} f{print} f&&/^unset -v _reflector_args$/{exit}' "$ORCH_SH")"
+grep -q '124) _rfl_why="timed out' <<<"$_rb" || fail "reflector failure must name a timeout"
+grep -q '(( NONINTERACTIVE )) || ui_warn "Mirror refresh' <<<"$_rb" || fail "reflector failure must be shown interactively"
+grep -q 'reflector skipped, timed out' <<<"$_rb" && fail "failure path must not say 'skipped'"
+unset -v _rb
 valid_hostname thinkpad-t14s || fail "hostname thinkpad-t14s should pass"
 valid_hostname host.example.com || fail "hostname FQDN should pass"
 valid_hostname -bad && fail "hostname -bad should fail" || true
@@ -1283,7 +1304,7 @@ grep -q 'firmware fallback loader) is replaced' "$INSTALL_SH" \
 # NONINTERACTIVE must never block on a keypress or msgbox (VM test: the final
 # "INSTALL COMPLETE" waited for [enter] forever with the target unmounted).
 _fns=""
-for _f in ui_fold ui_msg die start_log stop_log on_exit; do
+for _f in ui_fold ui_msg ui_restore_console die start_log stop_log on_exit; do
   _body="$(awk -v f="$_f" '$0 ~ "^"f"\\(\\) *\\{" {p=1} p{print} p&&/^}/{exit}' "$INSTALL_SH")"
   [[ -n $_body ]] || fail "could not extract $_f"
   _fns+="$_body"$'\n'
@@ -1447,11 +1468,52 @@ if command -v script >/dev/null 2>&1; then
 else
   echo "skip TUI geometry pty checks (no script(1))"
 fi
-# whiptail cuts long msgbox/yesno text unless --scrolltext (REVIEW is 30+ lines).
+# whiptail cuts long msgbox/yesno text unless --scrolltext (REVIEW is 30+ lines),
+# but --scrolltext moves focus into the text where Enter does nothing (every box
+# looked frozen on the ISO console): scroll only bodies taller than the screen.
 _um="$(awk '/^ui_msg\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh")"
-grep -q 'scroll=(--scrolltext)' <<<"$_um" || fail "whiptail msgbox must use --scrolltext"
+grep -q 'msg_overflows "$show"' <<<"$_um" && grep -q 'scroll=(--scrolltext)' <<<"$_um" \
+  || fail "whiptail msgbox must use --scrolltext only when the body overflows"
 _uy="$(awk '/^ui_yesno\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh")"
-grep -q 'extra+=(--scrolltext)' <<<"$_uy" || fail "whiptail yesno must use --scrolltext"
+grep -q 'msg_overflows "$folded"' <<<"$_uy" && grep -q 'extra+=(--scrolltext)' <<<"$_uy" \
+  || fail "whiptail yesno must use --scrolltext only when the body overflows"
+grep -qE '\[\[ \$UI == whiptail \]\] && (scroll=|extra\+=)\(--scrolltext\)' "$ROOT/lib/10-ui.sh" \
+  && fail "unconditional whiptail --scrolltext is back (Enter ignored on every box)"
+# msg_overflows: lines + 6 rows must fit XH.
+_mo() { bash -c 'source "$1"; XH=$2; msg_overflows "$(seq 1 "$3")"' _ "$ROOT/lib/10-ui.sh" "$1" "$2"; }
+_mo 20 14 && fail "14 lines fit a 20-row box (14+6)"
+_mo 20 15 || fail "15 lines overflow a 20-row box"
+unset -f _mo
+# list_height: whiptail shows only H - list - 6 prompt rows (the key hint under
+# every prompt was cut); dialog keeps LH and shrinks its list itself.
+_lh() { bash -c 'source "$1"; UI=$2 H=37 W=$3 LH=29; list_height "$4"' _ "$ROOT/lib/10-ui.sh" "$@"; }
+[[ $(_lh whiptail 120 $'prompt\n\nhint') == 28 ]] || fail "whiptail list must leave room for prompt+blank+hint"
+[[ $(_lh dialog 120 $'prompt\n\nhint') == 29 ]] || fail "dialog list height must stay LH"
+[[ $(_lh whiptail 60 "$(printf 'x%.0s' $(seq 1 200))") == 27 ]] || fail "wrapped prompt rows must be counted (200 cols / 54)"
+unset -f _lh
+for _f in ui_menu ui_radio ui_checklist; do
+  awk "/^${_f}\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$ROOT/lib/10-ui.sh" | grep -q 'list_height "' \
+    || fail "$_f must size its list with list_height"
+done
+unset -v _f
+# Kernel messages tear the TUI on a VT: muted while it runs, restored first on exit.
+awk '/^bootstrap_ui\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh" | grep -q 'ui_mute_console' \
+  || fail "bootstrap_ui must mute kernel console messages"
+for _f in die on_exit cleanup_ui; do
+  awk "/^${_f}\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{exit}" "$ROOT/lib/10-ui.sh" | sed -n 2,4p | grep -q 'ui_restore_console' \
+    || fail "$_f must restore the console log level first"
+done
+unset -v _f
+# Off a VT (this test's terminal) the console level is never touched.
+[[ -z $(bash -c 'source "$1"; ui_mute_console; printf %s "${UI_PRINTK_SAVED:-}"' _ "$ROOT/lib/10-ui.sh") ]] \
+  || fail "ui_mute_console must only act on a Linux VT"
+# whiptail (ISO default) ignores Esc: its hints must not promise it.
+_wh="$(awk '/^if \[\[ \$UI == whiptail \]\]; then$/{f=1} f{print} f&&/^fi$/{exit}' "$ROOT/install.sh")"
+grep -q 'TUI_HINT_RADIO=' <<<"$_wh" && ! grep -q 'Esc' <<<"$_wh" \
+  || fail "whiptail hints must say Tab to Abort, not Esc"
+# whiptail long steps: clear the last box before streaming live output.
+awk '/^run_progress\(\) *\{/{f=1} f{print} f&&/^}$/{exit}' "$ROOT/lib/10-ui.sh" | grep -qF "\e[H\e[2J" \
+  || fail "run_progress must clear the stale whiptail box"
 unset -v _um _uy
 
 # Partition/disk menus read lsblk -P: spaces stay readable (no "EFI\x20System")

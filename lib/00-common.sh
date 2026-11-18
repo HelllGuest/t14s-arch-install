@@ -52,6 +52,12 @@ valid_hostname() {
   [[ $h =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$ ]]
 }
 
+# reflector --country: names or codes, comma-separated. Letters, spaces and
+# commas only (lib/80-chroot-setup.sh writes it single-quoted into reflector.conf).
+valid_reflector_country() {
+  [[ $1 =~ ^[A-Za-z][A-Za-z\ ,]*$ ]]
+}
+
 valid_username() {
   local u="$1"
   [[ $u =~ ^[a-z_][a-z0-9_-]*$ ]] || return 1

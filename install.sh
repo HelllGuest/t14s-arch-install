@@ -146,6 +146,13 @@ if (( ! DRYRUN )); then
   timedatectl set-ntp true || true
 fi
 bootstrap_ui
+# newt (whiptail, the Arch ISO backend) ignores Esc on the console: Abort is a
+# button there, so the hints must not promise Esc.
+if [[ $UI == whiptail ]]; then
+  TUI_HINT_MENU='[log] view install log · [help] tips · Tab to Abort quits'
+  TUI_HINT_RADIO='Arrows+Space select · Enter=Next · Tab to Abort · [log]/[help]'
+  TUI_HINT_CHECK='Space=toggle · Enter=Next · Tab to Abort · [log]/[help]'
+fi
 say "preflight ok (UEFI + network + ntp)"
 
 if (( NONINTERACTIVE )); then
@@ -867,8 +874,12 @@ else
   unset -v _extras_keep
 
   if [[ $SKIP_REFLECTOR != Y ]]; then
-    REFLECTOR_COUNTRY="$(ui_input "Reflector --country (ISO codes, comma-ok; empty=worldwide)" \
-      "${REFLECTOR_COUNTRY:-}")" || die "aborted"
+    while :; do
+      REFLECTOR_COUNTRY="$(ui_input "Reflector --country (ISO codes, comma-ok; empty=worldwide)" \
+        "${REFLECTOR_COUNTRY:-}")" || die "aborted"
+      [[ -z $REFLECTOR_COUNTRY ]] || valid_reflector_country "$REFLECTOR_COUNTRY" && break
+      ui_error "Reflector country: letters, spaces and commas only (e.g. DE,NL or Germany). Got: $REFLECTOR_COUNTRY"
+    done
   else
     REFLECTOR_COUNTRY=
   fi
@@ -927,14 +938,10 @@ if [[ ${FORMAT_EFI:-1} == 1 ]]; then
 elif ! yn_on "${CLEAN_ESP_ARCH:-Y}"; then
   warn "CLEAN_ESP_ARCH=N — keeping prior Arch UKIs/arch*.conf; kernels/ucode still removed (pacstrap). Boot menu may show dead entries until you delete them."
 fi
-# Reflector country sanitize (letters/comma/space only).
-if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
-  _rc_re='^[A-Za-z][A-Za-z ,]*$'
-  if ! [[ $REFLECTOR_COUNTRY =~ $_rc_re ]]; then
-    warn "ignoring invalid REFLECTOR_COUNTRY=$REFLECTOR_COUNTRY"
-    REFLECTOR_COUNTRY=
-  fi
-  unset -v _rc_re
+# Reflector country sanitize (answers file / env; the prompt already re-asks).
+if [[ -n ${REFLECTOR_COUNTRY:-} ]] && ! valid_reflector_country "$REFLECTOR_COUNTRY"; then
+  ui_warn "Ignoring invalid REFLECTOR_COUNTRY=$REFLECTOR_COUNTRY (letters, spaces and commas only): mirrors will be ranked worldwide."
+  REFLECTOR_COUNTRY=
 fi
 
 # Optional free-form extras (archfi -cpl spirit). Env T14S_EXTRA_PKGS appends.
@@ -989,7 +996,7 @@ _REVIEW="REVIEW — nothing has been written yet.
   Profile       $PRESET
   Parallel DL   $PACMAN_PARALLEL
   Btrfs/zram    compress=$BTRFS_COMPRESS zram=$ZRAM_SIZE
-  Reflector     $([[ $SKIP_REFLECTOR == Y ]] && echo skip || echo "refresh${REFLECTOR_COUNTRY:+ ($REFLECTOR_COUNTRY)}")
+  Reflector     $([[ $SKIP_REFLECTOR == Y ]] && echo "skip (ISO mirrorlist until the weekly reflector run)" || echo "refresh${REFLECTOR_COUNTRY:+ ($REFLECTOR_COUNTRY)}")
   ThinkPad HW   $([[ $SKIP_THINKPAD_HW == Y ]] && echo skip || echo apply)
   Extra pkgs    $( ((${#EXTRA_PKGS[@]})) && printf '%s ' "${EXTRA_PKGS[@]}" || echo none)
   Desktop       $([[ $DESKTOP == Y ]] && echo 'minimal GNOME' || echo none)
@@ -1086,13 +1093,29 @@ if [[ -n ${REFLECTOR_COUNTRY:-} ]]; then
 fi
 if [[ $SKIP_REFLECTOR == Y ]]; then
   ok "reflector skipped by operator — using ISO mirrorlist"
-elif run_progress "refreshing live mirrors (best-effort, ≤45s)" \
-     timeout 45 reflector "${_reflector_args[@]}" \
-   && (( $(grep -c '^Server' "$ML_TMP") >= 3 )); then
-  cat "$ML_TMP" > /etc/pacman.d/mirrorlist   # keep existing inode/perms (0644)
-  ok "mirrorlist refreshed ($(grep -c '^Server' "$ML_TMP") mirrors)"
 else
-  warn "reflector skipped, timed out, or returned too few mirrors — keeping current mirrorlist"
+  _rfl_rc=0
+  run_progress "refreshing live mirrors (best-effort, ≤45s)" \
+    timeout 45 reflector "${_reflector_args[@]}" || _rfl_rc=$?
+  _rfl_n=$(grep -c '^Server' "$ML_TMP" || true)
+  if (( _rfl_rc == 0 && _rfl_n >= 3 )); then
+    cat "$ML_TMP" > /etc/pacman.d/mirrorlist   # keep existing inode/perms (0644)
+    ok "mirrorlist refreshed ($_rfl_n mirrors)"
+  else
+    case $_rfl_rc in
+      0) _rfl_why="returned only ${_rfl_n} mirror(s)" ;;
+      124) _rfl_why="timed out after 45s" ;;
+      *) _rfl_why="failed (exit $_rfl_rc)" ;;
+    esac
+    warn "reflector $_rfl_why — keeping current mirrorlist"
+    # A bare warn line is drawn over by the download gauge right away.
+    (( NONINTERACTIVE )) || ui_warn "Mirror refresh: reflector ${_rfl_why}.
+
+Continuing with the ISO mirrorlist (every mirror, unranked). The installed
+system keeps that list until reflector's first weekly run; after the first
+boot you can refresh it now: sudo systemctl start reflector.service"
+  fi
+  unset -v _rfl_rc _rfl_n _rfl_why
 fi
 rm -f "$ML_TMP"
 unset -v _reflector_args

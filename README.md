@@ -329,8 +329,14 @@ Plain fallback tags: `[CRITICAL]` vs `[ERASE]` (and `[WARN]` / `[ERROR]`).
   wipe confirms use **Erase** / **Abort**; hard gates use **Continue** /
   **Abort** (default No)
 * Arrows move; **Space** toggles; **Enter** = Next; **Tab** to buttons
-* **Esc** / Abort quits that menu (and the install if required)
+* **Abort** quits that menu (and the install if required). **Esc** does the
+  same with `dialog`; whiptail (the ISO default) ignores it, so **Tab** to Abort
 * Menus offer **[log]** and **[help]**; log: `/tmp/t14s-install.*.log`
+* Text taller than the screen scrolls with the arrows; then **Tab** to the
+  button and **Enter** (shorter messages take **Enter** directly)
+* On the console, kernel messages are kept off the screen while the installer
+  runs (they would draw over the boxes) and the log level is restored on exit;
+  follow them with `dmesg -w` on another TTY
 * MANUAL reuse: any partition listed; only FAT32 validates as ESP
 
 **AUTO mode erases the entire disk.** Interactive mode requires typing the

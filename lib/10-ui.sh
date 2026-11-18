@@ -230,7 +230,39 @@ write_dialogrc() {
   export NEWT_COLORS="$NEWT_COLORS_BASE"
 }
 
+# Kernel messages print straight onto the VT and tear dialog/whiptail screens
+# (amdgpu/ACPI/Wi-Fi errors on real hardware). On a VT, as root: show only
+# emergencies on the console while the TUI runs (dmesg/journal keep the rest);
+# cleanup_ui restores the level on every exit path.
+ui_mute_console() {
+  local stat f nr lvl
+  [[ -w /proc/sys/kernel/printk ]] || return 0
+  # Controlling terminal from /proc (`tty </dev/tty` only says "/dev/tty"):
+  # a VT is major 4, minor 1-63 (ttyS* are 64+; SSH is a pty, never muted).
+  read -r stat </proc/$$/stat || return 0
+  read -ra f <<<"${stat##*) }"
+  nr=${f[4]:-0}
+  [[ $nr =~ ^[0-9]+$ ]] || return 0
+  (( (nr >> 8 & 0xfff) == 4 && (nr & 0xff | nr >> 12 & 0xfff00) >= 1 \
+     && (nr & 0xff | nr >> 12 & 0xfff00) <= 63 )) || return 0
+  read -r lvl _ </proc/sys/kernel/printk || return 0
+  [[ $lvl =~ ^[0-9]+$ ]] && (( lvl > 1 )) || return 0
+  printf '1\n' >/proc/sys/kernel/printk 2>/dev/null && UI_PRINTK_SAVED=$lvl
+  return 0
+}
+
+# Idempotent; runs first in die/on_exit, before any write to a terminal that
+# may already be gone (hangup), so the console level is never left muted.
+ui_restore_console() {
+  if [[ -n ${UI_PRINTK_SAVED:-} ]]; then
+    printf '%s\n' "$UI_PRINTK_SAVED" >/proc/sys/kernel/printk 2>/dev/null || true
+    UI_PRINTK_SAVED=""
+  fi
+  return 0
+}
+
 cleanup_ui() {
+  ui_restore_console
   [[ -n ${DIALOG_RC_DIR:-} && -d $DIALOG_RC_DIR ]] && rm -rf -- "$DIALOG_RC_DIR"
   [[ -f ${LOG:-}.fail ]] && rm -f -- "$LOG.fail"
   # Drop empty dry-run / unused logs so /tmp does not accumulate zeros.
@@ -290,8 +322,17 @@ msg_height() {
   printf '%s' "$need"
 }
 
+# whiptail --scrolltext moves focus into the text, where Enter does nothing
+# (the box looks frozen until Tab). Only scroll bodies taller than the screen.
+msg_overflows() {
+  local lines
+  lines=$(printf '%s\n' "$1" | wc -l)
+  (( lines + 6 > ${XH:-$H} ))
+}
+
 die() { # message [exit-code]
   local msg=${1:-failed} rc=${2:-1} was_logging=$LOGGING
+  ui_restore_console
   T14S_DIED=1
   trap - ERR
   # After start_log, stderr is the log file: record the error there, then
@@ -327,6 +368,7 @@ Full log: $LOG" || true
 # Report it like die() instead of closing the TUI with the reason only in $LOG.
 on_exit() {
   local rc=$1
+  ui_restore_console
   if (( rc != 0 && ! ${T14S_DIED:-0} )); then
     # Operator interrupt (INT/TERM): report and exit, no dialog to dismiss.
     if (( rc == 130 || rc == 143 )); then
@@ -355,6 +397,7 @@ plain_pause(){ read -rsn1 -p ' [enter] ' </dev/tty || true; printf '\n' >&2; }
 ui_msg() {
   local sev=$1; shift
   local text folded title badge plain_c body newt drc h show
+  ui_geometry  # console font/size may have changed since the last step
   text=$*
   folded=$(ui_fold "$text"; printf x); folded=${folded%x}
   # dialog --colors needs literal \Z sequences (single-quoted; $'..' strips \Z).
@@ -428,9 +471,13 @@ ui_msg() {
   TUI_DIALOGRC=$drc
   _tui_btns msg
   # whiptail cuts text taller than the box unless --scrolltext (REVIEW and the
-  # finish screen are 30+ lines; an 80x24 console fits ~16).
+  # finish screen are 30+ lines; an 80x24 console fits ~16). Only then: in a
+  # scrolling box Enter is ignored until Tab reaches the button, so say so.
   local scroll=()
-  [[ $UI == whiptail ]] && scroll=(--scrolltext)
+  if [[ $UI == whiptail ]] && msg_overflows "$show"; then
+    scroll=(--scrolltext)
+    show=$'[ arrows scroll · Tab, then Enter to continue ]\n'"$show"
+  fi
   tui "${scroll[@]}" "${_btns[@]}" --msgbox "$show" "$h" "$MW" || true
   TUI_TITLE=""
   TUI_NEWT=""
@@ -459,6 +506,7 @@ Path: $LOG"
     return 0
   fi
   # Both dialog and whiptail support --textbox (scrollable file viewer).
+  ui_geometry
   TUI_TITLE="Install log — $APP_TITLE"
   tui --textbox "$LOG" "$H" "$W" || true
   TUI_TITLE=""
@@ -470,13 +518,14 @@ ui_console_help() {
 • Backtitle shows Step N/M · phase name
 • Full log:  $LOG
 • Other TTY: Ctrl+Alt+F2 → root →  tail -f $LOG
-• Menus: Next advances, Abort/Esc quits; [log] / [help] always available
+• Menus: Next advances, Abort quits (Esc too with dialog; whiptail: Tab to Abort); [log] / [help] always available
 • Checklist: Space toggles, Enter = Next
 • Radio/menu: arrows (+ Space on radio), Enter = Next
 • Severity badge + chrome (not color alone): INFO / WARN / ERROR / CRITICAL / OK
 • Destructive confirms default No
 • Hard gates (DMI/hook): Continue / Abort · wipe confirms: Erase / Abort
-• Live steps (pacstrap/chroot): dialog progress box; whiptail/plain stream to TTY"
+• Live steps (pacstrap/chroot): dialog progress box; whiptail/plain stream to TTY
+• Kernel messages are kept off this console while the installer runs: dmesg -w on another TTY"
 }
 
 # Handle special nav tags; return 0 if consumed (caller should re-prompt).
@@ -495,6 +544,7 @@ ui_yesno() { # text [default] [severity]
   #   erase    → CRITICAL chrome + Erase/Abort (disk/partition wipe only)
   local text=$1 def=${2:-yes} sev=${3:-}
   local folded old_title old_newt old_drc btn_role
+  ui_geometry
   folded=$(ui_fold "$text"; printf x); folded=${folded%x}
   old_title=$TUI_TITLE old_newt=$TUI_NEWT old_drc=$TUI_DIALOGRC
   btn_role=yesno
@@ -544,7 +594,10 @@ ui_yesno() { # text [default] [severity]
     return
   fi
   local extra=(); [[ $def == no ]] && extra=(--defaultno)
-  [[ $UI == whiptail ]] && extra+=(--scrolltext)
+  if [[ $UI == whiptail ]] && msg_overflows "$folded"; then
+    extra+=(--scrolltext)
+    folded=$'[ arrows scroll · Tab, then Enter to answer ]\n'"$folded"
+  fi
   _tui_btns "$btn_role"
   local rc=0
   tui "${extra[@]}" "${_btns[@]}" --yesno "$folded" "$(msg_height "$folded")" "$MW" || rc=$?
@@ -554,29 +607,48 @@ ui_yesno() { # text [default] [severity]
 
 ui_input() { # prompt [default]
   if [[ $UI == plain ]]; then ask "$1: " "${2:-}"; return; fi
+  ui_geometry
   _tui_btns nav
   tui "${_btns[@]}" --inputbox "$1" 10 "$MW" "${2:-}"
 }
 
 ui_password() { # prompt
   if [[ $UI == plain ]]; then ask_secret "$1: "; return; fi
+  ui_geometry
   _tui_btns nav
   tui "${_btns[@]}" --passwordbox "$1" 10 "$MW"
 }
 
+# list_height TEXT — list rows for a menu/radio/checklist whose prompt is TEXT.
+# whiptail shows only H - list - 6 prompt rows and cuts the rest (the key hint
+# under every prompt was never visible); dialog shrinks its list by itself.
+list_height() {
+  local line rows=0 tw=$(( W - 6 )) lh
+  [[ $UI == whiptail ]] || { printf '%s' "$LH"; return 0; }
+  (( tw < 20 )) && tw=20
+  while IFS= read -r line; do
+    rows=$(( rows + (${#line} > 0 ? (${#line} + tw - 1) / tw : 1) ))
+  done <<<"$1"
+  lh=$(( H - 6 - rows ))
+  (( lh > LH )) && lh=$LH
+  (( lh < 3 )) && lh=3
+  printf '%s' "$lh"
+}
+
 # ui_menu prompt tag description [tag description ...]  -> tag on stdout
-# Always offers log / help as extra entries. Next advances; Abort/Esc quits.
+# Always offers log / help as extra entries. Next advances; Abort (Esc: dialog only) quits.
 ui_menu() {
   local prompt=$1; shift
   local args=("$@") choice
   while true; do
     set -- "${args[@]}"
+    ui_geometry
     if [[ $UI != plain ]]; then
       _tui_btns nav
       choice=$(tui "${_btns[@]}" --menu "${prompt}
 
 $TUI_HINT_MENU" \
-        "$H" "$W" "$LH" "$@" \
+        "$H" "$W" "$(list_height "${prompt}"$'\n\n'"$TUI_HINT_MENU")" "$@" \
         log "View install log" \
         help "Console / log tips") || return 1
     else
@@ -611,12 +683,13 @@ ui_radio() {
   local args=("$@") choice
   while true; do
     set -- "${args[@]}"
+    ui_geometry
     if [[ $UI != plain ]]; then
       _tui_btns nav
       choice=$(tui "${_btns[@]}" --radiolist "${prompt}
 
 $TUI_HINT_RADIO" \
-        "$H" "$W" "$LH" "$@" \
+        "$H" "$W" "$(list_height "${prompt}"$'\n\n'"$TUI_HINT_RADIO")" "$@" \
         log "View install log" off \
         help "Console / log tips" off) || return 1
     else
@@ -657,6 +730,7 @@ ui_checklist() {
   local args=("$@") out raw
   while true; do
     set -- "${args[@]}"
+    ui_geometry
     if [[ $UI == dialog ]]; then
       _tui_btns nav
       raw=$(tui "${_btns[@]}" --separate-output --checklist "${prompt}
@@ -671,7 +745,7 @@ $TUI_HINT_CHECK" \
       raw=$(tui "${_btns[@]}" --checklist "${prompt}
 
 $TUI_HINT_CHECK" \
-        "$H" "$W" "$LH" "$@" \
+        "$H" "$W" "$(list_height "${prompt}"$'\n\n'"${TUI_HINT_CHECK}")" "$@" \
         log "View install log" off \
         help "Console / log tips" off) || return 1
       out=$(printf '%s\n' "$raw" | sed 's/"/\n/g' | awk 'NF && $0 !~ /^[[:space:]]*$/')
@@ -729,7 +803,7 @@ $TUI_HINT_CHECK" \
   done
 }
 
-ui_infobox() { [[ $UI == plain ]] && return 0; tui --infobox "$1" "$(msg_height "$1")" "$MW"; }
+ui_infobox() { [[ $UI == plain ]] && return 0; ui_geometry; tui --infobox "$1" "$(msg_height "$1")" "$MW"; }
 step() { say "$*"; ui_infobox "$*"; }
 
 # ── logging around the destructive phase ────────────────────
@@ -757,6 +831,7 @@ progress_banner() {
 run_progress() {
   local desc=$1; shift
   local rc=0
+  ui_geometry
   say "$desc"
   if [[ $UI == dialog && -w /dev/tty ]]; then
     # dialog --progressbox: piped output, exits when the command ends (no OK).
@@ -773,6 +848,9 @@ log: $LOG" "$H" "$W"
     return "$rc"
   fi
   if [[ -w /dev/tty ]]; then
+    # whiptail leaves its last box on screen: clear it, or the live output
+    # scrolls underneath a stale "Continue" box.
+    [[ $UI != plain ]] && printf '\e[H\e[2J' >/dev/tty
     progress_banner "$desc"
     set +e
     # Pipe steals stdout from exec→LOG; tee -a keeps the file in sync.
@@ -852,6 +930,7 @@ progress_filter() {
 run_gauge() {
   local desc=$1 lo=$2 hi=$3; shift 3
   local rc=0 hint="log: $LOG · other TTY: tail -f $LOG"
+  ui_geometry
   say "$desc"
   set +e
   if [[ ( $UI == dialog || $UI == whiptail ) && -w /dev/tty ]]; then
@@ -925,6 +1004,7 @@ bootstrap_ui() {
   fi
   if [[ $UI == dialog || $UI == whiptail ]]; then
     write_dialogrc
+    ui_mute_console
   fi
   ui_geometry
   return 0
