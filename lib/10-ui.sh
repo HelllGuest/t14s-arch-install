@@ -50,9 +50,31 @@ ui_geometry() {
 }
 ui_geometry
 
+# ui_bar PCT [WIDTH] — percent bar for backtitle / gauge / plain TTY.
+# UTF-8: █/░ ; C locale or non-UTF-8: #/- .
+ui_bar() {
+  local pct=${1:-0} w=${2:-10} filled empty i n bar=
+  [[ $pct =~ ^[0-9]+$ ]] || pct=0
+  [[ $w =~ ^[1-9][0-9]*$ ]] || w=10
+  (( pct > 100 )) && pct=100
+  n=$(( pct * w / 100 ))
+  if [[ ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} == *UTF-8* ]]; then
+    filled='█' empty='░'
+  else
+    filled='#' empty='-'
+  fi
+  for (( i = 0; i < w; i++ )); do
+    if (( i < n )); then bar+=$filled; else bar+=$empty; fi
+  done
+  printf '[%s]' "$bar"
+}
+
 ui_backtitle() {
-  if (( ${TUI_STEP:-0} > 0 )); then
-    printf '%s · %d/%d · %s' "$APP_TITLE" "$TUI_STEP" "$TUI_STEPS" "$TUI_STEP_NAME"
+  local bar pct=0
+  if (( ${TUI_STEP:-0} > 0 && ${TUI_STEPS:-0} > 0 )); then
+    pct=$(( TUI_STEP * 100 / TUI_STEPS ))
+    bar=$(ui_bar "$pct" 10)
+    printf '%s · %s %d/%d · %s' "$APP_TITLE" "$bar" "$TUI_STEP" "$TUI_STEPS" "$TUI_STEP_NAME"
   else
     printf '%s' "$APP_TITLE"
   fi

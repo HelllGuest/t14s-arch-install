@@ -10,14 +10,26 @@ stop_log()  { exec >&8 2>&9; LOGGING=0; }
 
 # Plain-console header for a long step (label + where to follow the log).
 progress_banner() {
+  local top bot mid bar
+  bar=$(ui_bar 0 20)
+  if [[ ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} == *UTF-8* ]]; then
+    top='────────────────────────────────────────────────────────'
+    bot=$top
+    mid='│'
+  else
+    top='--------------------------------------------------------'
+    bot=$top
+    mid='|'
+  fi
   {
     printf '\n'
-    printf '────────────────────────────────────────────────────────\n'
-    printf ' %s\n' "$1"
-    printf ' log: %s\n' "$LOG"
-    printf ' (live output — can take several minutes)\n'
-    printf ' tip: other TTY → tail -f %s\n' "$LOG"
-    printf '────────────────────────────────────────────────────────\n\n'
+    printf '%s\n' "$top"
+    printf '%s %s\n' "$mid" "$1"
+    printf '%s %s\n' "$mid" "$bar"
+    printf '%s log: %s\n' "$mid" "$LOG"
+    printf '%s (live output — can take several minutes)\n' "$mid"
+    printf '%s tip: other TTY → tail -f %s\n' "$mid" "$LOG"
+    printf '%s\n\n' "$bot"
   } >/dev/tty
   return 0
 }
@@ -75,7 +87,7 @@ log: $LOG" "$H" "$W"
 progress_filter() {
   local lo=${1:-0} hi=${2:-100} mode=${3:-gauge} desc=${4:-} hint=${5:-}
   local line clean pct=$lo new stage="" detail="" total=0 dl=0
-  local cur tot what blo bhi esc=$'\e'
+  local cur tot what blo bhi esc=$'\e' bar="" bar_pct=-1
   shopt -s extglob
   while IFS= read -r line || [[ -n $line ]]; do
     printf '%s\n' "$line" >>"$LOG"
@@ -114,8 +126,13 @@ progress_filter() {
     if [[ $mode == text ]]; then printf '%s\n' "$line"; continue; fi
     if (( new > pct )); then pct=$new; fi
     if (( pct > 99 )); then pct=99; fi
-    printf 'XXX\n%s\n%s\n\n%s\n%s\n\n%s\nXXX\n' "$pct" "$desc" "${stage:-working…}" \
-      "${detail:0:$(( W - 8 ))}" "$hint"
+    # Rebuild the bar only when the percent changes (pacstrap is chatty).
+    if (( pct != bar_pct )); then
+      bar=$(ui_bar "$pct" 20)
+      bar_pct=$pct
+    fi
+    printf 'XXX\n%s\n%s\n%s\n\n%s\n%s\n\n%s\nXXX\n' "$pct" "$desc" "$bar" \
+      "${stage:-working…}" "${detail:0:$(( W - 8 ))}" "$hint"
   done
   return 0
 }
@@ -134,7 +151,7 @@ run_gauge() {
     "$@" 2>&1 | progress_filter "$lo" "$hi" gauge "$desc" "$hint" \
       | tui --gauge "${desc}
 
-${hint}" 14 "$W" "$lo"
+${hint}" 16 "$W" "$lo"
     rc=${PIPESTATUS[0]}
     TUI_KEEP_STDIN=0
   elif [[ -w /dev/tty ]]; then

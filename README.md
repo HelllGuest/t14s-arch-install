@@ -218,8 +218,9 @@ Rehearse it: `VM_BOOTSTRAP=tests/vm-dual-bootstrap.sh FRESH=1 bash tests/vm-run.
 
 ### Screens
 
-Backtitle: `T14s Arch Installer · N/11 · Phase` (Heads-style progress).
-One question per screen. Long prose folded to ~76 columns.
+Backtitle: `T14s Arch Installer · [████░░░░░░] N/11 · Phase` (step bar + Heads-style progress).
+Bars use Unicode `█`/`░` when the locale is UTF-8, else ASCII `#`/`-`.
+One question per screen. Long prose folded to ~76 columns. Welcome shows the step bar in the destroy warning.
 
 1. Welcome
 2. Hardware warnings (DMI / AMD)
@@ -348,9 +349,10 @@ disk path and a second wipe confirm.
 Interactive: nothing destructive before the final confirm. Unattended: wipe
 starts after answers + `T14S_PASS_FILE` + `T14S_I_WILL_ERASE=1` validate (no
 confirm UI). Log: `/tmp/t14s-install.*.log`. pacstrap and the chroot step
-show a percentage gauge (dialog or whiptail `--gauge`): downloads, package
-installs `(k/N)`, hooks, then named chroot stages (UKIs, GNOME, Secure Boot…).
-Other long steps use `dialog --progressbox`; the plain UI streams raw output.
+show a percentage gauge (dialog or whiptail `--gauge`) with a Unicode/ASCII
+bar in the caption: downloads, package installs `(k/N)`, hooks, then named
+chroot stages (UKIs, GNOME, Secure Boot…). Other long steps use
+`dialog --progressbox`; the plain UI streams raw output under a boxed banner.
 All packages are downloaded first, into the target's pacman cache, before
 anything is installed: a mirror reset or stall is retried (`PREFETCH_TRIES`,
 default 4, backoff `PREFETCH_BACKOFF` × attempt seconds, default 10), and if

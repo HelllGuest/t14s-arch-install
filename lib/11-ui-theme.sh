@@ -107,7 +107,7 @@ itemhelp_color = (BLACK,CYAN,OFF)
 form_active_text_color = $focus
 form_text_color = (WHITE,BLACK,OFF)
 form_item_readonly_color = (CYAN,BLACK,ON)
-gauge_color = (CYAN,BLACK,ON)
+gauge_color = (CYAN,BLUE,ON)
 position_indicator_color = (CYAN,BLACK,ON)
 EOF
 }

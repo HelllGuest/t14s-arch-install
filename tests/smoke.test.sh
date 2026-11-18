@@ -337,6 +337,7 @@ for (a, b), (c, d) in zip(st, st[1:]):
 print('ok chroot stage markers')
 PY
 _pf_out="$(bash -c '
+  eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"
   eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
   LOG=/dev/null W=72
   { printf "Packages (2) a-1 b-1\n"
@@ -353,14 +354,15 @@ echo "ok progress_filter percents"
 # progress_filter edge cases: VerbosePkgLists header, footer hint on every
 # caption, plain text mode (raw passthrough + stage marker rewrite).
 _pf_edge="$(bash -c '
+  eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"
   eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
-  LOG=/dev/null W=72
+  LOG=/dev/null W=72 LC_ALL=C
   printf "Package (2)  New Version\n b-1-any.pkg.tar.zst downloading...\n" \
     | progress_filter 0 100 gauge step "HINT-LINE" | tr "\n" "|"
   echo
   printf "@@STAGE 34 72 GNOME\nraw line\n" | progress_filter 0 100 text step
 ' _ "$INSTALL_SH")"
-grep -q '|20|step||working…|downloading packages (1/2)||HINT-LINE|XXX|' <<<"$_pf_edge" \
+grep -Fq '|20|step|[####----------------]||working…|downloading packages (1/2)||HINT-LINE|XXX|' <<<"$_pf_edge" \
   || fail "progress_filter: VerbosePkgLists header or caption hint broken: $_pf_edge"
 [[ $(grep -c 'HINT-LINE' <<<"$(tr '|' '\n' <<<"$_pf_edge")") == 2 ]] \
   || fail "progress_filter: hint must be on every gauge caption"
@@ -383,7 +385,7 @@ STUB
 set -euo pipefail
 src=$1
 # First top-level definition only (chroot heredoc redefines say() inline).
-for fn in say _tty ui_backtitle tui progress_banner progress_filter run_gauge; do
+for fn in say _tty ui_bar ui_backtitle tui progress_banner progress_filter run_gauge; do
   eval "$(awk -v f="$fn" '
     !p && index($0, f "()") == 1 { p = 1; if ($0 ~ /\}[[:space:]]*$/) { print; exit } }
     p { print } p && /^\}/ { exit }' "$src")"
@@ -397,7 +399,7 @@ RUN
     >/dev/null 2>&1 || true
   grep -qx 'rc=7' "$_rg/rc" 2>/dev/null || fail "run_gauge must return the command exit status"
   grep -qx -- '--gauge' "$_rg/args" || fail "run_gauge must call dialog --gauge"
-  [[ $(tail -n 3 "$_rg/args" | tr '\n' ' ') == "14 72 34 " ]] \
+  [[ $(tail -n 3 "$_rg/args" | tr '\n' ' ') == "16 72 34 " ]] \
     || fail "run_gauge geometry/start % wrong: $(tail -n 3 "$_rg/args" | tr '\n' ' ')"
   grep -qx 'installing a (1/2)' "$_rg/stdin" || fail "run_gauge must stream captions to dialog"
   grep -q 'tail -f' "$_rg/stdin" || fail "run_gauge captions must keep the tail -f hint"
@@ -452,6 +454,19 @@ grep -q 'Message severity' "$ROOT/README.md" || fail "README must document messa
 grep -q 'per-severity' "$ROOT/README.md" || fail "README must note per-severity dialogrc/NEWT"
 grep -q 'ui_step' "$INSTALL_SH" || fail "wizard must set ui_step progress"
 grep -q 'ui_backtitle' "$INSTALL_SH" || fail "tui must use dynamic backtitle"
+grep -q '^ui_bar()' "$INSTALL_SH" || fail "must define ui_bar for step/gauge strips"
+grep -q 'ui_bar' "$INSTALL_SH" && awk '/^ui_backtitle\(\)/,/^}/' "$INSTALL_SH" | grep -q 'ui_bar' \
+  || fail "ui_backtitle must show a step bar via ui_bar"
+grep -q 'ui_bar' "$ROOT/lib/steps/02-welcome.sh" \
+  || fail "welcome must show a step bar in the destroy warn"
+# ui_bar shapes (UTF-8 + C locale)
+_bar_c="$(bash -c 'eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"; LC_ALL=C ui_bar 40 10' _ "$INSTALL_SH")"
+[[ $_bar_c == '[####------]' ]] || fail "ui_bar C 40%: got $_bar_c"
+_bar_u="$(bash -c 'eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"; LC_ALL=en_US.UTF-8 ui_bar 50 10' _ "$INSTALL_SH")"
+[[ $_bar_u == '[█████░░░░░]' ]] || fail "ui_bar UTF-8 50%: got $_bar_u"
+unset -v _bar_c _bar_u
+grep -q 'gauge_color = (CYAN,BLUE,ON)' "$INSTALL_SH" \
+  || fail "dialog gauge fill must be CYAN on BLUE"
 grep -q 'ui_fold' "$INSTALL_SH" || fail "messages must fold prose"
 grep -q '_tui_btns' "$INSTALL_SH" || fail "must set Next/Abort/Erase button labels"
 grep -q 'erase_yesno' "$INSTALL_SH" || fail "wipe confirms need erase_yesno buttons"
