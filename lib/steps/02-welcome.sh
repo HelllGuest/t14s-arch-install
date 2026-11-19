@@ -8,9 +8,7 @@ if (( NONINTERACTIVE )); then
   warn "NONINTERACTIVE: skipping welcome TUI (answers + T14S_I_WILL_ERASE gate wipe)"
 else
   ui_step 1 Welcome
-  ui_warn "T14s Arch Installer  $(ui_bar $(( 1 * 100 / TUI_STEPS )) 20)  1/${TUI_STEPS}
-
-THINKPAD STAGE A INSTALLER — DESTROYS DATA ON DISK
+  ui_warn "THINKPAD STAGE A INSTALLER — DESTROYS DATA ON DISK
 
 Machines: T14s Gen 3 AMD (21CQ/21CR) or P15 Gen 1 (20SU Optimus)
 Stack:    LUKS2 + Btrfs(+@tmp) + linux-lts/hardened + UKI + systemd-boot

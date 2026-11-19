@@ -50,21 +50,27 @@ ui_geometry() {
 }
 ui_geometry
 
-# ui_bar PCT [WIDTH] — percent bar for backtitle / gauge / plain TTY.
-# UTF-8: █/░ ; C locale or non-UTF-8: #/- .
+# ui_utf8: the active locale is UTF-8 (C.UTF-8, en_US.utf8, …) — box/bar
+# glyphs are safe; otherwise callers fall back to ASCII.
+ui_utf8() {
+  local l=${LC_ALL:-${LC_CTYPE:-${LANG:-}}}
+  [[ ${l,,} == *utf-8* || ${l,,} == *utf8* ]]
+}
+
+# ui_bar PCT [WIDTH] — percent bar for the backtitle. UTF-8: █/░; else #/-.
 ui_bar() {
   local pct=${1:-0} w=${2:-10} filled empty i n bar=
   [[ $pct =~ ^[0-9]+$ ]] || pct=0
   [[ $w =~ ^[1-9][0-9]*$ ]] || w=10
   (( pct > 100 )) && pct=100
   n=$(( pct * w / 100 ))
-  if [[ ${LC_ALL:-${LC_CTYPE:-${LANG:-}}} == *UTF-8* ]]; then
+  if ui_utf8; then
     filled='█' empty='░'
   else
     filled='#' empty='-'
   fi
   for (( i = 0; i < w; i++ )); do
-    if (( i < n )); then bar+=$filled; else bar+=$empty; fi
+    if (( i < n )); then bar+="$filled"; else bar+="$empty"; fi
   done
   printf '[%s]' "$bar"
 }
@@ -72,7 +78,8 @@ ui_bar() {
 ui_backtitle() {
   local bar pct=0
   if (( ${TUI_STEP:-0} > 0 && ${TUI_STEPS:-0} > 0 )); then
-    pct=$(( TUI_STEP * 100 / TUI_STEPS ))
+    # Completed steps: step 11/11 (the install itself) is 91%, not 100%.
+    pct=$(( (TUI_STEP - 1) * 100 / TUI_STEPS ))
     bar=$(ui_bar "$pct" 10)
     printf '%s · %s %d/%d · %s' "$APP_TITLE" "$bar" "$TUI_STEP" "$TUI_STEPS" "$TUI_STEP_NAME"
   else

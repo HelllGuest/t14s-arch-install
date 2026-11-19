@@ -112,3 +112,4 @@ else
 $(printf '%s' "$POST_TXT")"
 fi
 ok "done — reboot when ready"
+ui_offer_log "Install finished. View the full install log (also saved as /var/log/t14s-install.log on the new system), or exit."

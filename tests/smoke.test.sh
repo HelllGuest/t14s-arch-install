@@ -337,7 +337,6 @@ for (a, b), (c, d) in zip(st, st[1:]):
 print('ok chroot stage markers')
 PY
 _pf_out="$(bash -c '
-  eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"
   eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
   LOG=/dev/null W=72
   { printf "Packages (2) a-1 b-1\n"
@@ -354,15 +353,14 @@ echo "ok progress_filter percents"
 # progress_filter edge cases: VerbosePkgLists header, footer hint on every
 # caption, plain text mode (raw passthrough + stage marker rewrite).
 _pf_edge="$(bash -c '
-  eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"
   eval "$(sed -n "/^progress_filter()/,/^}/p" "$1")"
-  LOG=/dev/null W=72 LC_ALL=C
+  LOG=/dev/null W=72
   printf "Package (2)  New Version\n b-1-any.pkg.tar.zst downloading...\n" \
     | progress_filter 0 100 gauge step "HINT-LINE" | tr "\n" "|"
   echo
   printf "@@STAGE 34 72 GNOME\nraw line\n" | progress_filter 0 100 text step
 ' _ "$INSTALL_SH")"
-grep -Fq '|20|step|[####----------------]||working…|downloading packages (1/2)||HINT-LINE|XXX|' <<<"$_pf_edge" \
+grep -Fq '|20|step||working…|downloading packages (1/2)||HINT-LINE|XXX|' <<<"$_pf_edge" \
   || fail "progress_filter: VerbosePkgLists header or caption hint broken: $_pf_edge"
 [[ $(grep -c 'HINT-LINE' <<<"$(tr '|' '\n' <<<"$_pf_edge")") == 2 ]] \
   || fail "progress_filter: hint must be on every gauge caption"
@@ -385,7 +383,7 @@ STUB
 set -euo pipefail
 src=$1
 # First top-level definition only (chroot heredoc redefines say() inline).
-for fn in say _tty ui_bar ui_backtitle tui progress_banner progress_filter run_gauge; do
+for fn in say _tty ui_utf8 ui_bar ui_backtitle tui progress_banner progress_filter run_gauge; do
   eval "$(awk -v f="$fn" '
     !p && index($0, f "()") == 1 { p = 1; if ($0 ~ /\}[[:space:]]*$/) { print; exit } }
     p { print } p && /^\}/ { exit }' "$src")"
@@ -399,7 +397,7 @@ RUN
     >/dev/null 2>&1 || true
   grep -qx 'rc=7' "$_rg/rc" 2>/dev/null || fail "run_gauge must return the command exit status"
   grep -qx -- '--gauge' "$_rg/args" || fail "run_gauge must call dialog --gauge"
-  [[ $(tail -n 3 "$_rg/args" | tr '\n' ' ') == "16 72 34 " ]] \
+  [[ $(tail -n 3 "$_rg/args" | tr '\n' ' ') == "14 72 34 " ]] \
     || fail "run_gauge geometry/start % wrong: $(tail -n 3 "$_rg/args" | tr '\n' ' ')"
   grep -qx 'installing a (1/2)' "$_rg/stdin" || fail "run_gauge must stream captions to dialog"
   grep -q 'tail -f' "$_rg/stdin" || fail "run_gauge captions must keep the tail -f hint"
@@ -432,6 +430,51 @@ assert 'NEWT_COLORS="${NEWT_COLORS_BASE}${TUI_NEWT:-}"' in t, 'severity overlays
 print('ok TUI palette rules')
 PY
 grep -q 'ui_view_log' "$INSTALL_SH" || fail "must offer ui_view_log"
+# The install runs unattended after the Erase confirm: long steps never stop
+# for input (a menu after each gauge left installs waiting); the log is
+# offered once, at the very end.
+for _f in run_gauge run_progress; do
+  awk "/^${_f}\\(\\)/,/^}/" "$UI_SH" | grep -q 'ui_offer_log' \
+    && fail "$_f must not stop for input after a long step"
+done
+unset -v _f
+[[ $(grep -v '^[[:space:]]*#' "$WIZARD_SH" | grep -c 'ui_offer_log') == 1 ]] \
+  && tail -n 3 "$ROOT/lib/steps/30-finish.sh" | grep -q '^ui_offer_log' \
+  || fail "the log offer must appear once, at the end of 30-finish.sh"
+# ui_offer_log behaviour: unattended and plain UI skip it; Abort/no terminal
+# exits; [log] opens the viewer and returns to the menu; exit leaves.
+_ol() {  # UI NONINTERACTIVE menu-answers... -> "menus=N views=N rc=N" (a loop times out)
+  timeout 10 bash -c '
+    eval "$(awk "/^(ui_offer_log|ui_nav_special)\\(\\) *\\{/{f=1} f{print} f&&/^}\$/{f=0}" "$1")"
+    UI=$2 NONINTERACTIVE=$3; shift 3
+    c=$(mktemp); v=$(mktemp); answers=("$@")
+    ui_menu() { local n; n=$(wc -l <"$c"); echo >>"$c"
+      (( n < ${#answers[@]} )) || return 1
+      [[ ${answers[n]} == ABORT ]] && return 1; printf %s "${answers[n]}"; }
+    ui_view_log() { echo >>"$v"; }; ui_console_help() { :; }
+    rc=0; ui_offer_log "done" || rc=$?
+    echo "menus=$(wc -l <"$c") views=$(wc -l <"$v") rc=$rc"; rm -f "$c" "$v"' _ "$UI_SH" "$@"
+}
+[[ $(_ol whiptail 1 exit) == "menus=0 views=0 rc=0" ]] || fail "ui_offer_log must not prompt unattended"
+[[ $(_ol plain 0 exit) == "menus=0 views=0 rc=0" ]] || fail "ui_offer_log must not prompt twice on the plain UI"
+[[ $(_ol whiptail 0 ABORT) == "menus=1 views=0 rc=0" ]] || fail "Abort at the final menu must exit cleanly"
+[[ $(_ol whiptail 0 log log exit) == "menus=3 views=2 rc=0" ]] || fail "[log] must show the log and return to the menu"
+[[ $(_ol dialog 0) == "menus=1 views=0 rc=0" ]] || fail "no terminal (menu fails) must exit, not loop"
+unset -f _ol
+# ui_utf8: one locale test for bars and banners, any UTF-8 spelling.
+for _l in C.UTF-8 en_US.UTF-8 en_US.utf8 C.utf8; do
+  bash -c 'eval "$(sed -n "/^ui_utf8()/,/^}/p" "$1")"; LC_ALL=$2 ui_utf8' _ "$UI_SH" "$_l" \
+    || fail "ui_utf8 must accept $_l"
+done
+bash -c 'eval "$(sed -n "/^ui_utf8()/,/^}/p" "$1")"; LC_ALL=C ui_utf8' _ "$UI_SH" && fail "ui_utf8 must reject C"
+[[ $(grep -c 'LC_CTYPE' "$UI_SH") == 1 ]] || fail "locale detection must live only in ui_utf8"
+unset -v _l
+# Help text must match what long steps really show.
+grep -q 'Live steps (pacstrap/chroot): dialog progress box; whiptail/plain stream' "$UI_SH" \
+  && fail "console help still says whiptail streams pacstrap/chroot (it shows a gauge)"
+# progress_banner (plain console) must not draw a bar it never updates.
+awk '/^progress_banner\(\)/,/^}/' "$UI_SH" | grep -q 'ui_bar' \
+  && fail "progress_banner must not show a static progress bar"
 grep -q 'ui_checklist' "$INSTALL_SH" || fail "must offer ui_checklist multi-select"
 grep -q 'ui_info' "$INSTALL_SH" || fail "must define ui_info"
 grep -q 'ui_warn' "$INSTALL_SH" || fail "must define ui_warn"
@@ -457,12 +500,17 @@ grep -q 'ui_backtitle' "$INSTALL_SH" || fail "tui must use dynamic backtitle"
 grep -q '^ui_bar()' "$INSTALL_SH" || fail "must define ui_bar for step/gauge strips"
 grep -q 'ui_bar' "$INSTALL_SH" && awk '/^ui_backtitle\(\)/,/^}/' "$INSTALL_SH" | grep -q 'ui_bar' \
   || fail "ui_backtitle must show a step bar via ui_bar"
-grep -q 'ui_bar' "$ROOT/lib/steps/02-welcome.sh" \
-  || fail "welcome must show a step bar in the destroy warn"
+! grep -q 'ui_bar' "$ROOT/lib/steps/02-welcome.sh" \
+  || fail "welcome must not repeat the step bar (the backtitle shows it)"
+# The step bar counts completed steps: 11/11 (the install) is not 100% yet.
+_bt="$(bash -c 'eval "$(sed -n "/^ui_utf8()/,/^}/p;/^ui_bar()/,/^}/p;/^ui_backtitle()/,/^}/p" "$1")"
+  LC_ALL=C APP_TITLE=T TUI_STEPS=11 TUI_STEP=11 TUI_STEP_NAME=Install; ui_backtitle' _ "$UI_SH")"
+[[ $_bt == 'T · [#########-] 11/11 · Install' ]] || fail "step bar at 11/11 must show 91%, got: $_bt"
+unset -v _bt
 # ui_bar shapes (UTF-8 + C locale)
-_bar_c="$(bash -c 'eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"; LC_ALL=C ui_bar 40 10' _ "$INSTALL_SH")"
+_bar_c="$(bash -c 'eval "$(sed -n "/^ui_utf8()/,/^}/p;/^ui_bar()/,/^}/p" "$1")"; LC_ALL=C ui_bar 40 10' _ "$INSTALL_SH")"
 [[ $_bar_c == '[####------]' ]] || fail "ui_bar C 40%: got $_bar_c"
-_bar_u="$(bash -c 'eval "$(sed -n "/^ui_bar()/,/^}/p" "$1")"; LC_ALL=en_US.UTF-8 ui_bar 50 10' _ "$INSTALL_SH")"
+_bar_u="$(bash -c 'eval "$(sed -n "/^ui_utf8()/,/^}/p;/^ui_bar()/,/^}/p" "$1")"; LC_ALL=en_US.UTF-8 ui_bar 50 10' _ "$INSTALL_SH")"
 [[ $_bar_u == '[█████░░░░░]' ]] || fail "ui_bar UTF-8 50%: got $_bar_u"
 unset -v _bar_c _bar_u
 grep -q 'gauge_color = (CYAN,BLUE,ON)' "$INSTALL_SH" \

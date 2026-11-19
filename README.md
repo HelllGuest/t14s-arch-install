@@ -219,8 +219,9 @@ Rehearse it: `VM_BOOTSTRAP=tests/vm-dual-bootstrap.sh FRESH=1 bash tests/vm-run.
 ### Screens
 
 Backtitle: `T14s Arch Installer · [████░░░░░░] N/11 · Phase` (step bar + Heads-style progress).
-Bars use Unicode `█`/`░` when the locale is UTF-8, else ASCII `#`/`-`.
-One question per screen. Long prose folded to ~76 columns. Welcome shows the step bar in the destroy warning.
+Bars use Unicode `█`/`░` when the locale is UTF-8 (any spelling), else ASCII `#`/`-`.
+One question per screen. Long prose folded to ~76 columns. The bar counts completed
+steps (the install itself, 11/11, shows 91%).
 
 1. Welcome
 2. Hardware warnings (DMI / AMD)
@@ -334,6 +335,9 @@ Plain fallback tags: `[CRITICAL]` vs `[ERASE]` (and `[WARN]` / `[ERROR]`).
 * **Abort** quits that menu (and the install if required). **Esc** does the
   same with `dialog`; whiptail (the ISO default) ignores it, so **Tab** to Abort
 * Menus offer **[log]** and **[help]**; log: `/tmp/t14s-install.*.log`
+* Long steps (downloads, pacstrap, chroot) run without stopping; the final screen
+  offers **[log]** (same textbox viewer) before exiting (plain UI: the summary
+  prints the log path instead)
 * Text taller than the screen scrolls with the arrows; then **Tab** to the
   button and **Enter** (shorter messages take **Enter** directly)
 * On the console, kernel messages are kept off the screen while the installer
@@ -349,10 +353,10 @@ disk path and a second wipe confirm.
 Interactive: nothing destructive before the final confirm. Unattended: wipe
 starts after answers + `T14S_PASS_FILE` + `T14S_I_WILL_ERASE=1` validate (no
 confirm UI). Log: `/tmp/t14s-install.*.log`. pacstrap and the chroot step
-show a percentage gauge (dialog or whiptail `--gauge`) with a Unicode/ASCII
-bar in the caption: downloads, package installs `(k/N)`, hooks, then named
-chroot stages (UKIs, GNOME, Secure Boot…). Other long steps use
-`dialog --progressbox`; the plain UI streams raw output under a boxed banner.
+show a percentage gauge (dialog or whiptail `--gauge`): downloads, package
+installs `(k/N)`, hooks, then named chroot stages (UKIs, GNOME, Secure Boot…).
+Other long steps use `dialog --progressbox`; the plain UI streams raw output
+under a boxed banner (the step bar is in the backtitle only).
 All packages are downloaded first, into the target's pacman cache, before
 anything is installed: a mirror reset or stall is retried (`PREFETCH_TRIES`,
 default 4, backoff `PREFETCH_BACKOFF` × attempt seconds, default 10), and if

@@ -174,6 +174,22 @@ Path: $LOG"
   TUI_TITLE=""
 }
 
+# Once, after the final summary: View log, or exit. Never between install
+# steps (the install must run unattended after the Erase confirm). Abort/Esc
+# also exits: nothing is left to stop. Skipped unattended, and on the plain UI
+# (its summary already waited for Enter and prints the log path).
+ui_offer_log() {
+  local prompt=${1:-Installer finished} choice
+  (( ${NONINTERACTIVE:-0} )) && return 0
+  [[ $UI == plain ]] && return 0
+  while true; do
+    # ui_menu always appends [log] / [help]; no terminal -> it fails -> exit.
+    choice=$(ui_menu "$prompt" exit "Exit the installer") || return 0
+    ui_nav_special "$choice" && continue
+    return 0
+  done
+}
+
 ui_console_help() {
   ui_info "Console / log tips
 
@@ -186,7 +202,9 @@ ui_console_help() {
 • Severity badge + chrome (not color alone): INFO / WARN / ERROR / CRITICAL / OK
 • Destructive confirms default No
 • Hard gates (DMI/hook): Continue / Abort · wipe confirms: Erase / Abort
-• Live steps (pacstrap/chroot): dialog progress box; whiptail/plain stream to TTY
+• Downloads, pacstrap, chroot: percentage gauge (dialog and whiptail); other long
+  steps: dialog progress box, whiptail clears and streams; plain streams to the TTY
+• Long steps run without stopping; the final screen offers the install log
 • Kernel messages are kept off this console while the installer runs: dmesg -w on another TTY"
 }
 
